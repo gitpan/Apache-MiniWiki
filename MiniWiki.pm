@@ -22,12 +22,11 @@ use Date::Manip;
 use File::stat;
 use HTML::FromText;
 use HTML::Template;
-use Image::Magick;
 use Rcs 1.04;
 
-our ($VERSION, $datadir, $vroot, $authen, $template, $timediff, @templates);
+our ($VERSION, $datadir, $vroot, $authen, $template, $timediff, @templates, $uploads);
 
-$VERSION = 0.81;
+$VERSION = 0.83;
 
 # Global variables:
 # $datadir:       # Directory where we store Wiki pages (full path)
@@ -66,11 +65,59 @@ sub fatal_error {
   $text
   <hr>
   While viewing: $uri
+  <hr>
+  This should never have occurred. Please notify the administrator responsible for this site.
  </body>
 </html>
 __EOT__
   return OK;
 }
+
+## The function pretty_error is called most commonly when the the user
+## has done something correctly, and needs to be informed. In this situation,
+## we assume that things like a template and so forth are available.
+sub pretty_error {
+  my ($r, $text) = @_;
+
+  my $uri = $r->uri;
+
+  my $newtext = <<TEXT;
+Error
+
+*NOTE:* $text
+
+Please hit the *back* button in your browser, and try again.
+TEXT
+  $newtext = &prettify($newtext);
+    
+  $template->param('vroot', $vroot || "no vroot");
+  $template->param('title', $uri);
+  $template->param('body', $newtext);
+  $template->param('editlink', "$vroot/\(edit\)\/$uri");
+  $template->param('loglink', "$vroot/\(log\)\/$uri");
+  $template->param('pageurl', "http://$ENV{SERVER_NAME}:$ENV{SERVER_PORT}$ENV{REQUEST_URI}");
+  
+  my $output = $template->output;
+  
+  $r->send_http_header('text/html');
+  print $output;
+
+  return OK;
+}
+   
+# This converts the text into HTML with the help of HTML::FromText.
+# See the POD information for HTML::FromText for an explanation of
+# these settings.
+sub prettify {
+  my ($text) = @_;
+
+  return text2html( $text, 
+    urls => 1, email => 1, bold => 1,
+    underline =>1, paras => 1, bullets => 1, numbers=> 1,
+    headings => 1, blockcode => 1, tables => 1,
+    title => 1, code => 1
+  );
+}  
 
 # This is the main request handler. It begins by finding out its
 # configuration, if it has not before, loads templates and then calls
@@ -93,6 +140,7 @@ sub handler {
   $authen = $r->dir_config('authen') || -1;
   $timediff = $r->dir_config('timediff') || -8;
   @templates = $r->dir_config->get('templates');
+  $uploads = $r->dir_config('uploads') || 'yes';
 
   # First strip the virtual root from the URI, then set the URI to
   my ($uri) = ($r->uri =~ m/${vroot}\/?(.*)/i);
@@ -153,7 +201,7 @@ sub rcs_open {
   $obj->workdir($datadir);
   $obj->file($file);
 
-  $obj;
+  return $obj;
 }
 
 # This function allows the user to change his or her password, if
@@ -164,7 +212,7 @@ sub newpassword_function {
   my ($r, $uri) = @_;
 
   if ($authen eq -1) {
-    return fatal_error($r, "Authentification disabled in Apache::MiniWiki.");
+    return pretty_error($r, "Authentication has been disabled in Apache::MiniWiki.");
   }
 
   my $q = new CGI;
@@ -182,7 +230,7 @@ sub newpassword_function {
     }
     $text = "Password changed.\n";
   } elsif ($q->param() && ($q->param('password1') ne $q->param('password2'))) {
-    $text = "The passwords doesn't match each other.\n";
+    $text = "The passwords doen't match each other.\n";
   } else {
     $text = <<END;
 <form method="post" action="${vroot}/(newpassword)">
@@ -196,7 +244,6 @@ END
   $template->param('vroot', $vroot);
   $template->param('title', 'New Password');
   $template->param('body', $text);
-  ##$template->param("lastmod", "");
   
   $r->send_http_header('text/html');
   print $template->output;
@@ -210,7 +257,7 @@ sub save_function {
   my $fileuri = uri_to_filename($uri);
   
   if ($r->method() ne "POST") {
-    return fatal_error($r, "Invalid Save");
+    return fatal_error($r, "Invalid save, POST required.");
   }
 
   my $q = new CGI;
@@ -234,11 +281,11 @@ sub save_function {
   $comment =~ s/\s*$//g if $comment;
 
   if (length($text) < 5) {
-    return fatal_error($r, "Not enough content");
+    return pretty_error($r, "Not enough page text was provided.");
   }
 
   if (length($comment) < 3) {
-    return fatal_error($r, "No comment");
+    return pretty_error($r, "A longer comment is required.");
   }
 
   my $file = rcs_open($r, $fileuri);
@@ -250,12 +297,7 @@ sub save_function {
       my $locker = $file->lock;
       return fatal_error ($r, "($locker) Could not unlock $fileuri: $@");
     }
-    #return fatal_error($r, "Page $fileuri is already locked");
   }
-
-#  if (-f "${datadir}/${fileuri},v") {
-#    $file->co('-l') || die $!;
-#  }
 
   if (-f "${datadir}/${fileuri},v") {
     $file->co('-l') or confess $!;
@@ -270,10 +312,6 @@ sub save_function {
   open(OUT, '>', "${datadir}/${fileuri}");
   print OUT $text;
   close OUT;
-
-# if (!(-f "${datadir}/${fileuri},v") or $file->lock) {
-#   $file->ci('-u', '-w'.$user, "-m$comment") || die $!;
-# }
 
   $file->ci('-u', "-w$user", "-m$comment") or confess $!;
 
@@ -293,8 +331,8 @@ sub revert_function {
   my %args = $r->args;
 
   if (!$args{doit}) {
-    return fatal_error($r, 
-      "Bots are not allowed to follow the revert links!" .
+    return pretty_error($r, 
+      "Bots are not allowed to follow the revert links." .
       " If you are a human, add ?doit=1 to the url to revert."
     );
   }
@@ -333,16 +371,12 @@ sub revert_function {
   my $newtext = "The page has been reverted to revision $revision.<p>";
   $newtext .= qq([<a href="${vroot}/${uri}">Return</a>]<p><hr>);
 
-  my $mtime = stat("$datadir/$fileuri,v")->mtime;
-  my $date = &ParseDateString("epoch $mtime");
-  my $lastmod = &UnixDate($date, "%B %d, %Y<br>%i:%M %p");
-
   $template->param('vroot', $vroot);
   $template->param('title', $uri);
   $template->param('body', $newtext);
   $template->param('editlink', "$vroot/\(edit\)\/$uri");
   $template->param('loglink', "$vroot/\(log\)\/$uri");
-  $template->param("lastmod", "Last changed:<br>" . $lastmod);
+  $template->param("lastmod", &get_lastmod("${datadir}/${fileuri},v"));
 
   $r->send_http_header('text/html');
   print $template->output;
@@ -370,7 +404,7 @@ sub edit_function {
   if (is_binary($fileuri)) {
     $text .= "<input type=\"file\" name=\"text\">\n";
   } else {
-    $text .= "<textarea name=\"text\" cols=80 rows=25 wrap=virtual>\n";
+    $text .= "<textarea name=\"text\" cols=85 rows=25 wrap=virtual>\n";
     if (-f "${datadir}/${fileuri},v") {
       open(IN, '<', "${datadir}/${fileuri}");
       my $cvstext = join("", <IN>);
@@ -384,19 +418,12 @@ sub edit_function {
   
   $text .= "<p>Comment: <input type=text size=30 maxlength=80 name=comment>&nbsp;<input type=\"submit\" name=\"Save\" value=\"Save\"></form>";
 
-  my $lastmod = "never";
-  if (-f "${datadir}/${fileuri},v") {
-    my $mtime = stat("$datadir/$fileuri,v")->mtime;
-    my $date = &ParseDateString("epoch $mtime");
-    $lastmod = &UnixDate($date, "%B %d, %Y<br>%i:%M %p");
-  }
-
   $template->param('vroot', $vroot);
   $template->param('title', $uri);
   $template->param('body', $text);
   $template->param('editlink', "$vroot/\(edit\)\/$uri");
   $template->param('loglink', "$vroot/\(log\)\/$uri");
-  $template->param("lastmod", "Last changed:<br>" . $lastmod);
+  $template->param("lastmod", &get_lastmod("${datadir}/${fileuri},v"));
 
   my $output = $template->output;
   $output =~ s/\n(\s*)\n(\s*)\n/\n\n/g;
@@ -406,6 +433,23 @@ sub edit_function {
 
   return OK;
 }
+
+
+## This function determines when a given file was last changed
+## and returns a string about that.
+sub get_lastmod {
+  my ($filename) = @_;
+
+  my $lastmod = "never";
+  if (-f $filename) {
+    my $mtime = stat($filename)->mtime;
+    my $date = &ParseDateString("epoch $mtime");
+    $lastmod = &UnixDate($date, "%B %d, %Y<br>%i:%M %p");
+  }
+
+  return "Last changed:<br>$lastmod";
+}
+
 
 # This function is the standard viewer. It loads a file and displays it
 # to the user.
@@ -434,10 +478,7 @@ sub view_function {
     # If we're running under mod_perl, we can use its interface
     # to Apache's I/O routines to send binary files more efficiently.
     if (exists $ENV{MOD_PERL}) {
-      my $fh = Apache::File->new("${datadir}/${fileuri}");
-      $r->send_http_header();
-      $r->send_fd($fh);
-      $fh->close();
+	  &send_file($r, "${datadir}/${fileuri}");
     } else {
       my $file;
       open (FILE, "${datadir}/${fileuri}");
@@ -449,14 +490,8 @@ sub view_function {
     open(IN, '<', "${datadir}/${fileuri}");
     my $text = join("", <IN>);
     close IN;
-  
-    # This converts the text into HTML with the help of HTML::FromText.
-    # See the POD information for HTML::FromText for an explanation of
-    # these settings.
-    my $newtext = text2html($text, urls => 1, email => 1, bold => 1,
-      underline =>1, paras => 1, bullets => 1, numbers=> 1,
-      headings => 1, blockcode => 1, tables => 1,
-	  title => 1, code => 1);
+
+	my $newtext = &prettify($text);
   
     # While the text contains Wiki-style links, we go through each one and
     # change them into proper HTML links.
@@ -483,9 +518,7 @@ sub view_function {
       if (is_binary($rawname) || is_img($rawname)) {
         $link .= qq { <sup><a href="$vroot/(edit)$rawname">[E]</a></sup>};
       }
-      
       $newtext =~ s/\[\[[^\]]*\]\]/$link/;
-      
     } else {
       $tmplink = "$desc <a href=\"${vroot}\/(edit)/${rawname}\"><sup>?<\/sup><\/a>";
       $newtext =~ s/\[\[[^\]]*\]\]/$tmplink/;
@@ -496,17 +529,13 @@ sub view_function {
     $newtext =~ s/-{3,}/<hr>/g;
   
     my %dispatch = (
-    list => \&get_list,
-    listchanges => \&get_listchanges
+      list => \&get_list,
+      listchanges => \&get_listchanges
     );
     
     if ($dispatch{$uri}) {
-    $newtext .= $dispatch{$uri}($r);
+      $newtext .= $dispatch{$uri}($r);
     }
-  
-    my $mtime = stat("$datadir/$fileuri,v")->mtime;
-    my $date = &ParseDateString("epoch $mtime");
-    my $lastmod = &UnixDate($date, "%B %d, %Y<br>%i:%M %p");
   
     $template->param('vroot', $vroot || "no vroot");
     $template->param('title', $uri);
@@ -514,7 +543,7 @@ sub view_function {
     $template->param('editlink', "$vroot/\(edit\)\/$uri");
     $template->param('loglink', "$vroot/\(log\)\/$uri");
     $template->param('pageurl', "http://$ENV{SERVER_NAME}:$ENV{SERVER_PORT}$ENV{REQUEST_URI}");
-    $template->param("lastmod", "Last changed:<br>" . $lastmod);
+    $template->param("lastmod", &get_lastmod("${datadir}/${fileuri},v"));
   
     my $output = $template->output;
     $output =~ s/\n(\s*)\n(\s*)\n/\n\n/g;
@@ -536,12 +565,12 @@ sub diff_function {
   my (@rev) = grep { defined } @args{qw(rev1 rev2)};
 
   if (@rev < 1 or @rev > 2) {
-    return fatal_error($r, "Must supply one or two revisions.");
+    return pretty_error($r, "Must supply one or two revisions.");
   }
 
   my $diffformat = $args{m};
   if ($diffformat ne "c" and $diffformat) {
-    return fatal_error($r, "Diff format must be Context or Normal. $diffformat");
+    return pretty_error($r, "Diff format must be Context or Normal. $diffformat");
   }
 
   my $rcs = rcs_open($r, $uri);
@@ -556,20 +585,17 @@ sub diff_function {
   if ($@) {
     return fatal_error($r, "Diff failed for $uri: $@");
   }
-  $diffbody = "<H1>Differences</H1>" . text2html($diffbody, lines=>1);
+  $diffbody = "<H1>Differences</H1>" 
+  			 . text2html($diffbody, lines=>1);
   
   $diffbody .= &diff_form($uri);
 
-  my $mtime = stat("$datadir/$uri,v")->mtime;
-  my $date = &ParseDateString("epoch $mtime");
-  my $lastmod = &UnixDate($date, "%B %d, %Y<br>%i:%M %p");
-  
   $template->param('vroot', $vroot);
   $template->param('title', $uri);
   $template->param('body', $diffbody);
   $template->param('editlink', "$vroot/\(edit\)\/$uri");
   $template->param('loglink', "$vroot/\(log\)\/$uri");
-  $template->param("lastmod", "Last changed:<br>" . $lastmod);
+  $template->param("lastmod", &get_lastmod("${datadir}/${uri},v"));
 
   $r->send_http_header('text/html');
   print $template->output;
@@ -599,12 +625,7 @@ sub log_function {
 
   my $logbody = "History for $uri\n\n";
 
-  # use text2html to format the page title, so that it will
-  # match the titles in the rest of the site.
-  $logbody = text2html($logbody, urls => 1, email => 1, bold => 1,
-        underline =>1, paras => 1, bullets => 1, numbers=> 1,
-        headings => 1, blockcode => 1, tables => 1,
-		title => 1, code => 1);
+  $logbody = &prettify($logbody);
  
   $logbody .= qq|<a href="#diff_form">Compare revisions</a><br><br>\n|;
 
@@ -636,24 +657,18 @@ sub log_function {
 
   $logbody .= &diff_form($uri);
 
-  my $mtime = stat("$datadir/$uri,v")->mtime;
-  my $date = &ParseDateString("epoch $mtime");
-  my $lastmod = &UnixDate($date, "%B %d, %Y<br>%i:%M %p");
-  
   $template->param('vroot', $vroot);
   $template->param('title', $uri);
   $template->param('body', $logbody);
   $template->param('editlink', "$vroot/\(edit\)\/$uri");
   $template->param('loglink', "$vroot/\(log\)\/$uri");
-  $template->param("lastmod", "Last changed:<br>" . $lastmod);
+  $template->param("lastmod", &get_lastmod("${datadir}/${fileuri},v"));
 
   $r->send_http_header('text/html');
   print $template->output;
 
   return OK;
 }
-
-
 
 # this function creates a thumbnail on the fly for the given uri.
 # if the image is bigger then the cutoff, it gets resized. If not, it 
@@ -674,6 +689,7 @@ sub thumb_function {
 		return send_file($r, $thumburi);
 	}
 
+	use Image::Magick;
 	my $image = Image::Magick->new;
 
 	my ($width, $height, $size, $format) = $image->Ping($fileuri);
@@ -701,6 +717,7 @@ sub thumb_function {
 	}
 }
 
+## let mod_perl efficiently take care of sending a file to the browser
 sub send_file {
 	my ($r, $filename) = @_;
 
@@ -982,13 +999,19 @@ sub access_handler {
   return OK;
 }
 
+## is the link a binary upload?
+## are file uploads enabled?
 sub is_binary {
   my $uri = shift;
+  return 0 if $uploads =~ /^n/i;
   return ($uri =~ /\.(.+)$/ && grep /$1/i, @binfmts);
 }
 
+## is the link really an inline image?
+## are file uploads enabled?
 sub is_img {
   my $uri = shift;
+  return 0 if $uploads =~ /^n/i;
   return ($uri =~ /\.(.+)$/ && grep /$1/i, @imgfmts);
 }
 
@@ -1002,8 +1025,8 @@ Apache::MiniWiki - Miniature Wiki for Apache
 
 =head1 DESCRIPTION
 
-Apache::MiniWiki is an simplistic Wiki for Apache. It doesn't
-have much uses besides very simple installations where hardly any features
+Apache::MiniWiki is a simplistic Wiki for Apache. It doesn't have 
+much uses besides very simple installations where hardly any features
 are needed. What is does support though is:
 
   - storage of Wiki pages in RCS
@@ -1027,7 +1050,7 @@ This module requires these other modules:
   Apache::Constants
   CGI
   Date::Manip
-  Image::Magick
+  Image::Magick (Optional)
   HTML::FromText
   HTML::Template
   Rcs
@@ -1129,12 +1152,12 @@ If this variable is set, it should point to a standard htpasswd file
 which MiniWiki has write access to. The function to change a users password
 is then enabled.
   
-The default timezone is GMT-8 (PST). To change to a different timezone, 
+(Optional) The default timezone is GMT-8 (PST). To change to a different timezone, 
 use the C<timediff> variable. Eg, to change to Amsterdam / Rome:
 
   PerlAddVar timediff 1
 
-By default, only the template called template is used. This becomes 
+(Optional) By default, only the template called template is used. This becomes 
 the default template for every page. Use the C<templates> variable to specify
 more then one template:
   
@@ -1144,6 +1167,12 @@ By doing this, pages that contain those words will use the matching template.
 For example, the /your-wiki-vroot/LinuxDatabases page will then use the template-linux page,
 instead of template. You will need to create the template by going to
 /wiki/your-wiki-vroot/(edit)/template-<the_template> first.
+
+(Optional) To disable file uploads such as binary attachments and inline images,
+set uploads to no. By default it is yes. Note that inline images requires the
+Image::Magick module to be installed for generating thumbnails.
+  
+  PerlAddVar uploads no
 
 If you create the pages 'list' or 'listchanges', the following will
 automatically get appended to them:
@@ -1166,6 +1195,30 @@ appropriate settings.
 
 For an example of automating this using perl, see conf/httpd-perl-startup.pl 
 in the MiniWiki distribution for a sample mod_perl startup file.
+
+=head1 TEMPLATE VARIABLES
+
+These variables are passed by Apache::MiniWiki to HTML::Template:
+
+  vroot:
+    virtual root of the wiki installation. E.g.
+	  /wiki
+  title:
+    the title of a page. Comes from the first line of text.
+  body:
+    HTMLified version of a wiki page
+  editlink:
+    Link to the edit page. E.g.:
+	  http://www.nyetwork.org/wiki/(edit)/MiniWiki
+  loglink:
+    Link to the Archive page. e.g.:
+	  http://www.nyetwork.org/wiki/(log)/MiniWiki
+  pageurl:
+    Fully qualified link to the page based on the last request, e.g.:
+	  http://nyetwork.org:80/wiki/MiniWiki
+  lastmod:
+    date the page was last changed, e.g.:
+	  Last changed:<br>March 18, 2003 4:25 PM
 
 =head1 SEARCH ENGINES
 
