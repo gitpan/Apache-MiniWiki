@@ -82,8 +82,8 @@ USE AS A CGI SCRIPT
     and the Apache::Registry (or a module that emulates it) is available.
 
     Copy the example wiki.cgi into your CGI directory and assign it the
-    appropriate permissions. Edit wiki.cgi and set the datadir and vroot
-    variables:
+    appropriate permissions. Edit wiki.cgi and add the required options,
+    such as the datadir and vroot variables:
 
      $r->dir_config->add(datadir => '/home/foo/db/wiki/');
      $r->dir_config->add(vroot => '/perlcgi/wiki.cgi');
@@ -149,8 +149,15 @@ CONFIGURATION
 
       PerlAddVar uploads no
 
-    If you create the pages 'list' or 'listchanges', the following will
-    automatically get appended to them:
+    (Optional) Pre-caching can be done by a periodic (eg every 5 minutes)
+    cronjob to refresh the cached version of the .list* pages (see below) in
+    the background, rather then when Apache::Miniki discovers that the cache
+    is old when a request is done. To eanble:
+
+      PerlAddVar precaching yes
+
+    If you create the pages 'list' or 'listchanges' or 'listlinks', the
+    following will automatically get appended to them:
 
      - list:        A simple line deliminated list of 
                     all the pages in the system
@@ -158,6 +165,10 @@ CONFIGURATION
      - listchanges: Ordered by date, gives a list of all pages 
                     including the last comment, the number of lines 
                     added or removed, and the date of the last change
+
+     - listlinks:   Creates a list of all the inner/outer HTML links on the site,
+                    grouped by page name. By using CSS and some JavaScript in your
+                                    template, it can become very easy to navigate around this way.
 
     The master 'template' page does not show up in any of these three page
     listings.
@@ -192,7 +203,7 @@ TEMPLATE VARIABLES
               http://nyetwork.org:80/wiki/MiniWiki
       lastmod:
         date the page was last changed, e.g.:
-              Last changed:<br>March 18, 2003 4:25 PM
+              March 18, 2003 4:25 PM
 
 SEARCH ENGINES
     Spiders for search engines (Google, OpenFind, etc) love the bounty of
@@ -224,6 +235,6 @@ CONTRIBUTORS
     Brian Lauer, <fozbaca@yahoo.com>
 
 SEE ALSO
-    perl, Apache::Registry, HTML::FromText, HTML::Template, Rcs, CGI,
-    Date::Manip, Image::Magick.
+    perl, Apache::Registry, HTML::FromText, HTML::LinkExtor, HTML::Template,
+    Rcs, CGI, Date::Manip, Image::Magick.
 

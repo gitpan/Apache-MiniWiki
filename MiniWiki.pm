@@ -14,19 +14,19 @@ use 5.006;
 use strict;
 
 use Apache::Constants;
-use Apache::File;
 use Apache::Htpasswd;
 use Carp;
 use CGI;
 use Date::Manip;
 use File::stat;
 use HTML::FromText;
+use HTML::LinkExtor;
 use HTML::Template;
 use Rcs 1.04;
 
-our ($VERSION, $datadir, $vroot, $authen, $template, $timediff, @templates, $uploads);
+our ($VERSION, $datadir, $vroot, $authen, $template, $timediff, @templates, $uploads, $precaching);
 
-$VERSION = 0.83;
+$VERSION = 0.90;
 
 # Global variables:
 # $datadir:       # Directory where we store Wiki pages (full path)
@@ -39,7 +39,7 @@ $VERSION = 0.83;
 # Global variables containing the recognized file extensions
 # for images and binary files.
 our @imgfmts = qw ( jpg jpeg gif png );
-our @binfmts = ( @imgfmts, qw ( pdf doc ps gz zip ) );
+our @binfmts = ( @imgfmts, qw ( pdf doc ps gz zip bz2 tar ) );
 
 # global variables to set thumbnail cutoff
 our ($max_width, $max_height) = (600,400);
@@ -60,7 +60,7 @@ sub fatal_error {
   print <<__EOT__;
 <html>
  <body>
-  <h1>Error in Apache::MiniWiki</h1>
+  <p id="title">Error in Apache::MiniWiki</p>
   <hr>
   $text
   <hr>
@@ -77,7 +77,9 @@ __EOT__
 ## has done something correctly, and needs to be informed. In this situation,
 ## we assume that things like a template and so forth are available.
 sub pretty_error {
-  my ($r, $text) = @_;
+  my ($r, $text, $return) = @_;
+
+  $return ||= OK;
 
   my $uri = $r->uri;
 
@@ -102,7 +104,7 @@ TEXT
   $r->send_http_header('text/html');
   print $output;
 
-  return OK;
+  return $return;
 }
    
 # This converts the text into HTML with the help of HTML::FromText.
@@ -112,12 +114,14 @@ sub prettify {
   my ($text) = @_;
 
   return text2html( $text, 
-    urls => 1, email => 1, bold => 1,
+    urls => 1, email => 0, bold => 1,
     underline =>1, paras => 1, bullets => 1, numbers=> 1,
     headings => 1, blockcode => 1, tables => 1,
     title => 1, code => 1
   );
 }  
+  
+sub strip_virtual { $_[0] =~ s/^${vroot}\///i; $_[0] }
 
 # This is the main request handler. It begins by finding out its
 # configuration, if it has not before, loads templates and then calls
@@ -125,12 +129,6 @@ sub prettify {
 # the user.
 sub handler {
   my $r = shift;
-
-  # All information we send is of type text/html
-  # But this is no longer the case, since we are now sending images
-  # and binary files as well, so we can't do this here, but instead have
-  # to be more careful.
-  # $r->send_http_header('text/html');
 
   # Load configuration directives.
   $datadir = $r->dir_config('datadir') or
@@ -141,9 +139,10 @@ sub handler {
   $timediff = $r->dir_config('timediff') || -8;
   @templates = $r->dir_config->get('templates');
   $uploads = $r->dir_config('uploads') || 'yes';
+  $precaching = $r->dir_config('precaching') || 'no';
 
-  # First strip the virtual root from the URI, then set the URI to
-  my ($uri) = ($r->uri =~ m/${vroot}\/?(.*)/i);
+  # First strip the virtual root from the URI
+  my $uri = &strip_virtual($r->uri);
 
   # trailing / away
   $datadir =~ s/(\/)$//g;
@@ -165,13 +164,18 @@ sub handler {
   my %args = $r->args;
   my $revision = $args{rev};
   my $page = $2 || $uri;
-      
+
+  # all dot files are hidden and forbidden
+  if ($page =~ /^\./) {
+    return &pretty_error($r, "All dot files are hidden", FORBIDDEN);
+  }
+
   my $retval;
   eval {
     no strict 'refs';
     $retval = &$function($r, $page || "index", $revision);
   };
-  
+
   if ($@) { return fatal_error($r, "Unknown function $function called: $@"); }
   else { return $retval; }
 }
@@ -317,7 +321,11 @@ sub save_function {
 
   $uri = "index" if ($uri and $uri eq 'template');
 
-  return &view_function($r, $uri, undef);
+  if (not &is_img($uri) and &is_binary($uri)) {
+    return &edit_function($r, $uri, undef);
+  } else { 
+    return &view_function($r, $uri);
+  }
 }
 
 # This function reverts a page back to the specified version if possible.
@@ -328,19 +336,19 @@ sub revert_function {
   
   my $user = $r->connection->user || "anonymous";
 
-  my %args = $r->args;
+  my $q = new CGI();
 
-  if (!$args{doit}) {
-    return pretty_error($r, 
-      "Bots are not allowed to follow the revert links." .
-      " If you are a human, add ?doit=1 to the url to revert."
-    );
+  # force someone to manually (via POST) submit a form
+  # makes it a step or two harder for spiders/bots to automatically
+  # trigger. Another method could be to use mod_rewrite to check for the referrer.
+  if (!$q->param("doit")) {
+    return &revert_form($r, $uri, $revision);
   }
   
   my $file = rcs_open($r, $fileuri);
 
   if (! -f "${datadir}/${fileuri},v") {
-    return fatal_error($r, "Page $fileuri,v does not exist at all");
+    return fatal_error($r, "Page $fileuri,v is not a readable file");
   }
 
   # remove working copies, in case they are bad
@@ -369,7 +377,7 @@ sub revert_function {
   }
 
   my $newtext = "The page has been reverted to revision $revision.<p>";
-  $newtext .= qq([<a href="${vroot}/${uri}">Return</a>]<p><hr>);
+  $newtext .= qq([<a href="${vroot}/${uri}">Return</a>]<p>);
 
   $template->param('vroot', $vroot);
   $template->param('title', $uri);
@@ -382,6 +390,36 @@ sub revert_function {
   print $template->output;
 
   return OK;
+}
+
+sub revert_form {
+	my ($r, $uri, $revision) = @_;
+  
+ 	my $fileuri = uri_to_filename($uri);
+
+    my $formhtml = qq(
+		<form method=post action="${vroot}/(revert)${uri}?rev=$revision">
+		 <input type=hidden name="doit" value=1>
+		 Really revert the page <b>$uri</b> to revision <b>$revision</b>?<br>
+		 <br>
+		 <input type=submit value=" Yes " name="submit_button">
+		</form>
+	);
+  
+	$template->param('vroot', $vroot);
+	$template->param('title', $uri);
+	$template->param('body', $formhtml);
+	$template->param('editlink', "$vroot/\(edit\)\/$uri");
+	$template->param('loglink', "$vroot/\(log\)\/$uri");
+	$template->param("lastmod", &get_lastmod("${datadir}/${fileuri},v"));
+
+	my $output = $template->output;
+	$output =~ s/\n(\s*)\n(\s*)\n/\n\n/g;
+
+	$r->send_http_header('text/html');
+	print $output;
+
+	return OK;
 }
 
 # The edit function checks out a page from RCS and provides a text
@@ -399,12 +437,13 @@ sub edit_function {
     }
   }
 
-  my $text = "<form method=\"post\" action=\"${vroot}/(save)${uri}\" enctype=\"multipart/form-data\">\n";
+  my $text = &prettify("Edit: $fileuri");
+  $text .= "<form method=\"post\" action=\"${vroot}/(save)${uri}\" enctype=\"multipart/form-data\">\n";
   
   if (is_binary($fileuri)) {
     $text .= "<input type=\"file\" name=\"text\">\n";
   } else {
-    $text .= "<textarea name=\"text\" cols=85 rows=25 wrap=virtual>\n";
+    $text .= "<textarea rows=20 cols=80 class='areas' name=\"text\" wrap=virtual>\n";
     if (-f "${datadir}/${fileuri},v") {
       open(IN, '<', "${datadir}/${fileuri}");
       my $cvstext = join("", <IN>);
@@ -444,10 +483,10 @@ sub get_lastmod {
   if (-f $filename) {
     my $mtime = stat($filename)->mtime;
     my $date = &ParseDateString("epoch $mtime");
-    $lastmod = &UnixDate($date, "%B %d, %Y<br>%i:%M %p");
+    $lastmod = &UnixDate($date, "%B %d, %Y  %i:%M %p");
   }
 
-  return "Last changed:<br>$lastmod";
+  return "$lastmod";
 }
 
 
@@ -459,14 +498,14 @@ sub view_function {
   
   my $fileuri = uri_to_filename($uri);
 
-  # If the file doesn't exist as an RCS file, then we return NOT_FOUND to
-  # Apache.
-  if (! -f "${datadir}/${fileuri},v") {
-    return NOT_FOUND;
+  # If the file doesn't exist as an RCS file,
+  # then we return NOT_FOUND to Apache.
+  if (! (-f "${datadir}/${fileuri},v" and -r "${datadir}/${fileuri},v")) {
+	return NOT_FOUND;
   }
 
   # If we don't have a checked out file, check it out. Can't really do caching here,
-  # as we also deal with multiple revisions of the files. If there is a performance 
+  # as we also deal with multiple revisions of the files. If there is a performance
   # bottleneck here, in the future we may need to look at other means of caching.
   my $file = rcs_open($r, $fileuri);
   eval { $file->co("-r$revision"); };
@@ -477,21 +516,125 @@ sub view_function {
   if (is_binary($fileuri)) {
     # If we're running under mod_perl, we can use its interface
     # to Apache's I/O routines to send binary files more efficiently.
+	my ($img_ext) = &is_img($fileuri);
     if (exists $ENV{MOD_PERL}) {
-	  &send_file($r, "${datadir}/${fileuri}");
+	  return send_file($r, "${datadir}/${fileuri}");
     } else {
+		if ($img_ext) {
+		  $r->send_http_header("image/$img_ext");
+		} else {
+		  $r->send_http_header("application/octet-stream");
+		}
       my $file;
       open (FILE, "${datadir}/${fileuri}");
       { local undef $/; $file = <FILE>; }
-      $r->send_http_header();
       print $file;
     }
+	return OK;
   } else {
     open(IN, '<', "${datadir}/${fileuri}");
     my $text = join("", <IN>);
     close IN;
 
-	my $newtext = &prettify($text);
+	my $newtext = &render(&prettify($text));
+  
+    my %dispatch = (
+      list => \&get_list,
+      listchanges => \&get_listchanges,
+	  listlinks => \&get_listlinks
+    );
+    
+    if ($dispatch{$uri}) {
+	  my $cachefile = "${datadir}/.${uri}";
+
+      # precaching is when we rely on a cronjob to periodically
+	  # refresh these dispatched pages
+	  # if precaching is on, just show the previously cached version if it's there
+	  # All caching is done to the hidden dot files.
+      if ($precaching =~ /^y/i) {
+        if (-f $cachefile) {
+		  $newtext .= &get_file($cachefile);
+		} else {
+		  return &pretty_error($r, "Cache file not found :-(", NOT_FOUND);
+		}
+	  } else {
+	    my $lastchange_mtime = &get_mtime(&get_lastchanged);
+	    my $cache_mtime = &get_mtime("." . $uri);
+		my $pagedata = "";
+	    if (! -f $cachefile || $cache_mtime < $lastchange_mtime) {
+		  # cache is old, refresh it
+          $pagedata = $dispatch{$uri}($r);
+		  &put_file("$cachefile", $pagedata);
+		} else {
+		  $pagedata = &get_file($cachefile);
+		}
+		$newtext .= $pagedata;
+      }
+    }
+  
+    $template->param('vroot', $vroot || "no vroot");
+    $template->param('title', $uri);
+    $template->param('body', $newtext);
+    $template->param('editlink', "$vroot/\(edit\)\/$uri");
+    $template->param('loglink', "$vroot/\(log\)\/$uri");
+    $template->param('pageurl', "http://$ENV{SERVER_NAME}:$ENV{SERVER_PORT}$ENV{REQUEST_URI}");
+    $template->param("lastmod", &get_lastmod("${datadir}/${fileuri},v"));
+  
+    my $output = $template->output;
+    $output =~ s/\n(\s*)\n(\s*)\n/\n\n/g;
+  
+    $r->send_http_header('text/html');
+    print $output;
+  }
+
+  return OK;
+}
+
+# returns a string containing the contents of the given filename
+sub get_file($) {
+	my ($filename) = @_;
+
+	my $data = "";
+	
+	open (FILE, "$filename") || die "$filename - $!";
+	while (<FILE>) {
+		$data .= $_;
+	}
+	close (FILE);
+
+	return $data;
+}
+
+# write the given data to the given filename
+sub put_file($$) {
+  my ($filename, $data) = @_;
+
+  open (OUT, "> $filename") || die $!;
+  print OUT $data;
+  close(OUT);
+}
+
+# returns the name of the last page that was editted in the wiki
+sub get_lastchanged {
+  open (CMD, "cd ${datadir}; /bin/ls -1at *,v | head -1 |") || die $!;
+  my $filename = <CMD>;
+  close (CMD);
+	$filename =~ s/\t|\r|\n//g;
+	$filename =~ s/ $//g;
+	$filename =~ s/^ //g;
+  return $filename;
+}
+
+# returns the timestamp of the given filename in the datadir
+sub get_mtime($) {
+  my ($filename) = @_;
+  if (-f "$datadir/$filename") {
+    my $mtime = stat("$datadir/$filename")->mtime;
+  }
+}
+
+sub render($) {
+    my ($newtext) = @_;
   
     # While the text contains Wiki-style links, we go through each one and
     # change them into proper HTML links.
@@ -506,7 +649,7 @@ sub view_function {
   
     my $tmppath = uri_to_filename($rawname);
     $tmppath =~ s/^_//;
-  
+
     if (-f "${datadir}/$tmppath,v") {
       my $link;
       if (is_img($rawname)) {
@@ -527,32 +670,8 @@ sub view_function {
     $newtext =~ s/\\\[\\\[/\[\[/g;
   
     $newtext =~ s/-{3,}/<hr>/g;
-  
-    my %dispatch = (
-      list => \&get_list,
-      listchanges => \&get_listchanges
-    );
-    
-    if ($dispatch{$uri}) {
-      $newtext .= $dispatch{$uri}($r);
-    }
-  
-    $template->param('vroot', $vroot || "no vroot");
-    $template->param('title', $uri);
-    $template->param('body', $newtext);
-    $template->param('editlink', "$vroot/\(edit\)\/$uri");
-    $template->param('loglink', "$vroot/\(log\)\/$uri");
-    $template->param('pageurl', "http://$ENV{SERVER_NAME}:$ENV{SERVER_PORT}$ENV{REQUEST_URI}");
-    $template->param("lastmod", &get_lastmod("${datadir}/${fileuri},v"));
-  
-    my $output = $template->output;
-    $output =~ s/\n(\s*)\n(\s*)\n/\n\n/g;
-  
-    $r->send_http_header('text/html');
-    print $output;
-  }
 
-  return OK;
+    return $newtext;
 }
 
 # this function gets the diff for a file and displays it to the user
@@ -585,7 +704,7 @@ sub diff_function {
   if ($@) {
     return fatal_error($r, "Diff failed for $uri: $@");
   }
-  $diffbody = "<H1>Differences</H1>" 
+  $diffbody = "<p id='title'>Differences</p>" 
   			 . text2html($diffbody, lines=>1);
   
   $diffbody .= &diff_form($uri);
@@ -611,10 +730,6 @@ sub log_function {
   
   my $fileuri = uri_to_filename($uri);
 
-  #Rcs->arcext(''); 
-
-  #$fileuri = qq("$fileuri") if $fileuri =~ / /;
-
   my $obj = rcs_open($r, $fileuri, 1);
   my $head_revision = ($obj->revisions)[0];
   my @rlog_complete;
@@ -626,7 +741,7 @@ sub log_function {
   my $logbody = "History for $uri\n\n";
 
   $logbody = &prettify($logbody);
- 
+
   $logbody .= qq|<a href="#diff_form">Compare revisions</a><br><br>\n|;
 
   my $server = $r->server->server_hostname;
@@ -680,6 +795,9 @@ sub thumb_function {
 	my $thumburi = $datadir . "/THUMB_" . uri_to_filename($uri);
 	
 	my $file_mtime = stat($fileuri)->mtime;
+		
+	my ($subtype) = &is_img($uri);
+	#$r->send_http_header("image/$subtype");
 
 	if (-f $thumburi && stat($thumburi)->mtime > $file_mtime) {
 		# if the thumbnail is newer then the big image,
@@ -721,11 +839,10 @@ sub thumb_function {
 sub send_file {
 	my ($r, $filename) = @_;
 
-	my $fh = Apache::File->new($filename);
-	$r->send_http_header();
-	$r->send_fd($fh);
-	$fh->close();
-	return OK;
+	my $subr = $r->lookup_file($filename);
+	$r->headers_out(%{$subr->headers_out});
+	$r->send_http_header($subr->content_type);
+	return $subr->run;
 }
 
 # this function returns the HTML for a form that allows the
@@ -757,8 +874,8 @@ END
 sub get_template {
   my ($r) = @_;
 
-  if (! -f "${datadir}/template,v") {
-    $r->log_error("template,v does not exist!");
+  if (!( -f "${datadir}/template,v" and -r "${datadir}/template,v")) {
+    $r->log_error("${datadir}/template,v is not a readable file! Using default.");
 
     my $template_text = <<END_TEMPLATE;
 <html>
@@ -767,14 +884,14 @@ sub get_template {
 <TMPL_VAR NAME=BODY>
 <p>
 <hr>
-This is a default template. For a full example of wiki pages, use those provided in the Apache::MiniWiki distribution.
-
-See the archive: <a href="<TMPL_VAR NAME=loglink>">Archive</a>.
-
+<i>This is a default template. For a full example of wiki pages, 
+use those provided in the Apache::MiniWiki distribution.</i>
 <hr>
-[<a href="<TMPL_VAR NAME=editlink>">Edit</a> | <a href="<TMPL_VAR NAME=vroot>">Home</a> ]
+[<a href="<TMPL_VAR NAME=editlink>">Edit</a> | 
+<a href="<TMPL_VAR NAME=loglink>">Archive</a> |
+<a href="<TMPL_VAR NAME=vroot>/">Home</a> ]
 <br><br>
-<TMPL_VAR NAME="lastmod">
+Last Modified: <TMPL_VAR NAME="lastmod">
 </body></html>
 END_TEMPLATE
   
@@ -805,7 +922,11 @@ END_TEMPLATE
 
 # This function lists all files in the data directory
 # and returns an HTML formatted list of links.
+# Pages templates are never displayed (when the pagename is 'template' 
+# or begins with 'template-')
 sub get_list {
+  my ($r, $do_externals) = @_;
+
   my $linklist = "";
 
   chdir ($datadir);
@@ -815,15 +936,113 @@ sub get_list {
 
   # sort them 
   my @sorted_files = sort {uc($a) cmp uc($b)} @files;
-  
+
+  my $parser = HTML::LinkExtor->new();
+
+  my ($total_in, $total_out, $total_bytes) = (0,0,0);
+
+  if ($do_externals) {
+	$linklist .= qq|
+		Links: <a href="javascript:showAllLinks()">Expand All</a>, 
+		<a href="javascript:hideAllLinks()">Collapse All</a>
+		<br><br>
+		|;
+  }
+
   foreach my $rawname (@sorted_files) {
     $rawname =~ s/,v$//;
-    $rawname =~ s/^\///g;
-    next if ($rawname eq "template");
-    $linklist .= qq|<a href="$vroot/$rawname">$rawname</a><br>\n|;
+    $rawname =~ &uri_to_filename($rawname);
+    next if ($rawname eq "template" or $rawname =~ /^template-/i);
+	my $title;
+	if (&is_binary($rawname)) {
+		$title = $rawname;
+	} else {
+		$title = &get_page_title($rawname);
+	}
+    $linklist .= qq|<a id="$rawname">$title</a>: <a href="$vroot/$rawname">view page</a>|;
+	if ($do_externals && !&is_binary($rawname)) {
+		open(IN, '<', "${datadir}/${rawname}");
+		my $text = join("", <IN>);
+		close IN;
+
+		my $htmltext = &prettify($text);
+		my $newtext = &render($htmltext);
+
+		my $spanhtml = "";
+		my $spanlinks = 0;
+
+		$parser->parse($newtext);
+		$total_bytes += length($newtext);
+
+		my (@links) = $parser->links;
+		$spanhtml .= qq|<span id="links_${rawname}" style="display:none"><ul>|;
+		foreach my $link (@links) {
+			my $href = $link->[2];
+			next if ($href =~ /\(edit\)|template-/i or $href eq "${vroot}/template");
+			next if ($href eq "http://"); # not real
+			if ($href =~ /^${vroot}/) {
+				next if (!-f &strip_virtual($href));
+				$href = "#" . &strip_virtual($href);
+				$total_in++;
+			} else {
+				$total_out++;
+			}
+			$spanlinks++;
+			my $display = $href;
+			if (length($display) > 80) {
+				$display = substr($display, 0, 80) . "...";
+			}
+			$spanhtml .= qq|<li><a onClick="checkInLink(this)" href="$href">$display</a></li>\n|;
+		}
+		$spanhtml .= qq|</ul></span>|;
+
+		$linklist .= qq|,&nbsp;<a name="expand_link" href="javascript:void(0)" onClick="expand(this, 'links_${rawname}')">view links ($spanlinks)</a><br>|;
+		$linklist .= $spanhtml;
+
+		$r->log_error("should be done: $rawname");
+		$parser->eof();
+	} else {
+		$linklist .= "<br>\n";
+	}
+
+  }
+
+  if ($do_externals) {
+	$linklist .= "<br><hr>$total_in inside links, $total_out outside links, for a total of $total_bytes bytes of rendered body html.<br>";
+	$linklist .= qq|
+		Links: <a href="javascript:showAllLinks()">Expand All</a>, 
+		<a href="javascript:hideAllLinks()">Collapse All</a>
+		|;
   }
   
   return $linklist;
+}
+
+# This function lists all the external http links on the site, 
+# grouped by page title
+sub get_listlinks {
+  my ($r) = @_;
+
+  return &get_list($r, 1);
+}
+
+# obtain the title of the page, which should be the
+# first line of the page normally.
+# Only do this if it is a text file. For binary files,
+# the filename will be used.
+sub get_page_title {
+	my ($page) = @_;
+
+	my $title;
+	if (-T $page and !is_binary($page)) {
+		open (FILE, "< $datadir/$page") || return $page;
+		while ($title = (<FILE>)) {
+			last if ($title);
+		}
+		close (FILE);
+	}
+
+	$title || $page;
 }
 
 # This function does up a pretty list of all the changes in the
@@ -848,7 +1067,7 @@ sub get_listchanges {
 	
 	my $day_counter = 0;
 	my $page_counter = 0;
-	
+  
 	while (my $page = (<LS>)) {
 		chomp ($page);
 		$page =~ s/(,v)$//g;
@@ -887,21 +1106,7 @@ sub get_listchanges {
 			}
 		}
 
-		if (-T $page and !is_binary($page)) {
-			# obtain the title of the page, which should be the
-			# first line of the page normally.
-			# Only do this if it is a text file. For binary files,
-			# the filename will be used.
-			my $working_file = $page;
-			open (FILE, "< $datadir/$working_file") || 
-				next;
-			while ($title = (<FILE>)) {
-				last if ($title);
-			}
-			close (FILE);
-		}
-		
-		$title ||= $page;
+		$title = &get_page_title($page);
 
 		# no wiki words
 		$title =~ s/\[|\]//g;
@@ -1109,8 +1314,8 @@ web server's httpd.conf, as long as Apache has mod_perl built in, and the
 Apache::Registry (or a module that emulates it) is available.
 
 Copy the example wiki.cgi into your CGI directory and assign it the 
-appropriate permissions. Edit wiki.cgi and set the datadir and vroot
-variables:
+appropriate permissions. Edit wiki.cgi and add the required options, such as
+the datadir and vroot variables:
 
  $r->dir_config->add(datadir => '/home/foo/db/wiki/');
  $r->dir_config->add(vroot => '/perlcgi/wiki.cgi');
@@ -1171,10 +1376,17 @@ instead of template. You will need to create the template by going to
 (Optional) To disable file uploads such as binary attachments and inline images,
 set uploads to no. By default it is yes. Note that inline images requires the
 Image::Magick module to be installed for generating thumbnails.
-  
+
   PerlAddVar uploads no
 
-If you create the pages 'list' or 'listchanges', the following will
+(Optional) Pre-caching can be done by a periodic (eg every 5 minutes) cronjob
+to refresh the cached version of the .list* pages (see below) in the background,
+rather then when Apache::Miniki discovers that the cache is old when a request is
+done. To eanble:
+
+  PerlAddVar precaching yes
+
+If you create the pages 'list' or 'listchanges' or 'listlinks', the following will
 automatically get appended to them:
 
  - list:        A simple line deliminated list of 
@@ -1183,6 +1395,10 @@ automatically get appended to them:
  - listchanges: Ordered by date, gives a list of all pages 
                 including the last comment, the number of lines 
                 added or removed, and the date of the last change
+
+ - listlinks:   Creates a list of all the inner/outer HTML links on the site,
+                grouped by page name. By using CSS and some JavaScript in your
+				template, it can become very easy to navigate around this way.
 
 The master 'template' page does not show up in any of these three page
 listings.
@@ -1218,7 +1434,7 @@ These variables are passed by Apache::MiniWiki to HTML::Template:
 	  http://nyetwork.org:80/wiki/MiniWiki
   lastmod:
     date the page was last changed, e.g.:
-	  Last changed:<br>March 18, 2003 4:25 PM
+	  March 18, 2003 4:25 PM
 
 =head1 SEARCH ENGINES
 
@@ -1259,7 +1475,7 @@ Brian Lauer, E<lt>fozbaca@yahoo.comE<gt>
 
 =head1 SEE ALSO
 
-L<perl>, L<Apache::Registry>, L<HTML::FromText>, L<HTML::Template>, L<Rcs>, L<CGI>, L<Date::Manip>, L<Image::Magick>.
+L<perl>, L<Apache::Registry>, L<HTML::FromText>, L<HTML::LinkExtor>, L<HTML::Template>, L<Rcs>, L<CGI>, L<Date::Manip>, L<Image::Magick>.
 
 =cut
 

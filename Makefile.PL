@@ -4,7 +4,7 @@ WriteMakefile(
     'NAME'		=> 'Apache::MiniWiki',
     'VERSION_FROM'	=> 'MiniWiki.pm',
     'PREREQ_PM'		=> { 'Apache::Constants' => 0,
-			     'CGI' => 0,
+			     'CGI' => 2.47,
 			     'HTML::FromText' => 0,
 			     'HTML::Template' => 0,
 			     'Rcs' => 1.04,
