@@ -1,0 +1,36 @@
+head	1.1;
+access;
+symbols;
+locks; strict;
+comment	@# @;
+
+
+1.1
+date	2001.11.03.13.18.56;	author jonas;	state Exp;
+branches;
+next	;
+
+
+desc
+@Initial checkin.
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.0 Transitional//EN" "http://www.w3.org/TR/REC-html40/loose.dtd">
+  <html>
+    <head><title>Example MiniWiki</title></head>
+    <body>
+     [<a href="<TMPL_VAR NAME=editlink>">Edit</a>|<a href="/wiki/(newpassword)">Change Password<sup>1</sup></a>]<br>
+<TMPL_VAR NAME=BODY>
+<p><hr>
+<sup>1</sup>This will only work if authentification is enabled in
+Apache::MiniWiki. See the POD documentation, or the manual page for
+more information.
+    </body>
+  </html>
+@

@@ -1,0 +1,33 @@
+head	1.1;
+access;
+symbols;
+locks; strict;
+comment	@# @;
+
+
+1.1
+date	2001.11.03.13.18.46;	author jonas;	state Exp;
+branches;
+next	;
+
+
+desc
+@Initial checkin
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@_Welcome_
+
+Welcome to your first Apache::MiniWiki installation. This installation doesn't
+contain very much and is waiting for you to add content to it. You can start
+by modifying the [[template]] page, or perhaps take a look at how to [[edit]]
+pages.
+
+If you wish, you can also create your own [[playground]] by clicking on the
+questionmark after the word playground to create that missing page.
+@

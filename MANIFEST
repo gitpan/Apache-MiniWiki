@@ -1,0 +1,7 @@
+Makefile.PL
+MANIFEST
+README
+MiniWiki.pm
+example/template,v
+example/index,v
+example/edit,v

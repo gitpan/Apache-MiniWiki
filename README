@@ -1,0 +1,47 @@
+Apache::MiniWiki version 0.20
+=============================
+
+Apache::MiniWiki is an increadibly simplistic Wiki server for Apache.
+
+INSTALLATION
+
+To install this module type the following:
+
+   perl Makefile.PL
+   make
+   make install
+
+Then configure your Apache server by putting something like this
+in its configuration:
+
+  <Location /wiki>
+     PerlAddVar datadir "/home/foo/db/wiki/"
+     PerlAddVar vroot "/wiki"
+     SetHandler perl-script
+     PerlHandler Apache::MiniWiki
+  </Location>
+
+The datadir should point to a directory where Apache can write.
+The vroot should match the <Location>. You should then visit
+the URL http://server.name/wiki/(edit)/index to create a first
+index page. An example datadir is included in the distribution
+in the directory example/ which you can use if you wish.
+
+DEPENDENCIES
+
+This module requires these other modules:
+
+  Apache::Htpasswd;
+  Apache::Constants;
+  CGI;
+  HTML::FromText;
+  HTML::Template;
+  Rcs;
+
+COPYRIGHT AND LICENCE
+
+  Copyright (C) 2001  Jonas Oberg
+
+  This program is free software; you can redistribute it and/or
+  modify it under the same terms as Perl itself.
+
