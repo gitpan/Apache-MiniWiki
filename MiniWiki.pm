@@ -16,9 +16,10 @@ use strict;
 use Apache::Constants;
 use Apache::Htpasswd;
 use Carp;
-use CGI;
+use CGI qw(:cgi);
 use Date::Manip;
 use File::stat;
+use HTML::Entities;
 use HTML::FromText;
 use HTML::LinkExtor;
 use HTML::Template;
@@ -26,7 +27,7 @@ use Rcs 1.04;
 
 our ($VERSION, $datadir, $vroot, $authen, $template, $timediff, @templates, $uploads, $precaching);
 
-$VERSION = 0.90;
+$VERSION = 0.92;
 
 # Global variables:
 # $datadir:       # Directory where we store Wiki pages (full path)
@@ -48,6 +49,7 @@ our ($max_width, $max_height) = (600,400);
 # Set this to something more sensible if they are located elsewhere.
 Rcs->bindir('/usr/bin');
 
+
 # The function fatal_error is called most commonly when the Apache virtual
 # host has not had the correlt PerlVar's configured.
 sub fatal_error {
@@ -61,11 +63,11 @@ sub fatal_error {
 <html>
  <body>
   <p id="title">Error in Apache::MiniWiki</p>
-  <hr>
+  <hr/>
   $text
-  <hr>
+  <hr/>
   While viewing: $uri
-  <hr>
+  <hr/>
   This should never have occurred. Please notify the administrator responsible for this site.
  </body>
 </html>
@@ -199,6 +201,14 @@ sub uri_to_filename {
 # locking must be handled by the calling function.
 sub rcs_open {
   my ($r, $file) = @_;
+  	
+  delete @ENV{qw(PATH IFS CDPATH ENV BASH_ENV)};
+
+  if ($file =~ /^([0-9a-zA-Z\ \_\:\.\-]+)$/) {
+    $file = $1;
+  } else {
+    die "Bad page name: $file!";
+  }
 
   my $obj = Rcs->new;
   $obj->rcsdir($datadir);
@@ -216,7 +226,7 @@ sub newpassword_function {
   my ($r, $uri) = @_;
 
   if ($authen eq -1) {
-    return pretty_error($r, "Authentication has been disabled in Apache::MiniWiki.");
+    return &pretty_error($r, "Authentication has been disabled in Apache::MiniWiki.");
   }
 
   my $q = new CGI;
@@ -238,9 +248,11 @@ sub newpassword_function {
   } else {
     $text = <<END;
 <form method="post" action="${vroot}/(newpassword)">
- New password: <input type="password" name="password1"><br>
+<fieldset>
+ New password: <input type="password" name="password1"><br/>
  Again: <input type="password" name="password2"><p>
  <input type="submit" name="Change">
+ </fieldset>
 </form>
 END
   }
@@ -277,6 +289,10 @@ sub save_function {
     $text =~ s/\r//g;
   }
 
+  if ($q->param("Save") =~ /preview/i) {
+    return &edit_function($r, $uri, $text);
+  }
+
   my $comment = $q->param('comment');
   my $user = $r->connection->user || "anonymous";
 
@@ -285,14 +301,14 @@ sub save_function {
   $comment =~ s/\s*$//g if $comment;
 
   if (length($text) < 5) {
-    return pretty_error($r, "Not enough page text was provided.");
+    return &pretty_error($r, "Not enough page text was provided.");
   }
 
   if (length($comment) < 3) {
-    return pretty_error($r, "A longer comment is required.");
+    return &pretty_error($r, "A longer comment is required.");
   }
 
-  my $file = rcs_open($r, $fileuri);
+  my $file = &rcs_open($r, $fileuri);
 
   if (-f "${datadir}/${fileuri},v" && $file->lock) {
     # previous locks exist, removing.  Is this a good idea?
@@ -345,7 +361,7 @@ sub revert_function {
     return &revert_form($r, $uri, $revision);
   }
   
-  my $file = rcs_open($r, $fileuri);
+  my $file = &rcs_open($r, $fileuri);
 
   if (! -f "${datadir}/${fileuri},v") {
     return fatal_error($r, "Page $fileuri,v is not a readable file");
@@ -399,10 +415,12 @@ sub revert_form {
 
     my $formhtml = qq(
 		<form method=post action="${vroot}/(revert)${uri}?rev=$revision">
+		<fieldset>
 		 <input type=hidden name="doit" value=1>
-		 Really revert the page <b>$uri</b> to revision <b>$revision</b>?<br>
-		 <br>
+		 Really revert the page <b>$uri</b> to revision <b>$revision</b>?<br/>
+		 <br/>
 		 <input type=submit value=" Yes " name="submit_button">
+		</fieldset>
 		</form>
 	);
   
@@ -425,37 +443,53 @@ sub revert_form {
 # The edit function checks out a page from RCS and provides a text
 # area for the user where he or she can edit the content.
 sub edit_function {
-  my ($r, $uri) = @_;
+  my ($r, $uri, $preview_wikitext) = @_;
 
   my $fileuri = uri_to_filename($uri);
+  
+  my $q = new CGI;
+
+  my $comment = $q->param("comment") || "";
+
 
   if (-f "${datadir}/${fileuri},v") {
-    my $file = rcs_open($r, $fileuri);
+    my $file = &rcs_open($r, $fileuri);
     eval { $file->co; };
     if ($@) {
       return fatal_error($r, "Error while retrieving $fileuri: $@");
     }
   }
 
-  my $text = &prettify("Edit: $fileuri");
-  $text .= "<form method=\"post\" action=\"${vroot}/(save)${uri}\" enctype=\"multipart/form-data\">\n";
+  my $text = "";
+
+  if ($preview_wikitext) {
+    $text .= qq(<div class="previewborder">);
+	$text .= &render(&prettify("PREVIEW of " . $preview_wikitext));
+	$text .= qq(</div>);
+  }
+
+  $text .= &prettify("Edit: $fileuri");
+  $text .= "<form method=\"post\" action=\"${vroot}/(save)${uri}\" enctype=\"multipart/form-data\"><fieldset>\n";
+
   
   if (is_binary($fileuri)) {
     $text .= "<input type=\"file\" name=\"text\">\n";
   } else {
     $text .= "<textarea rows=20 cols=80 class='areas' name=\"text\" wrap=virtual>\n";
-    if (-f "${datadir}/${fileuri},v") {
-      open(IN, '<', "${datadir}/${fileuri}");
-      my $cvstext = join("", <IN>);
+	if ($preview_wikitext) {
+	  $text .= $preview_wikitext;
+	} elsif (-f "${datadir}/${fileuri},v") {
+      open (IN, '<', "${datadir}/${fileuri}")
+	  	|| return fatal_error($r, "Couldn't read ${fileuri}");
+      $text .= encode_entities(join('', <IN>));
       close (IN);
-      $cvstext =~ s/</&lt;/g;
-      $cvstext =~ s/>/&gt;/g;
-      $text .= $cvstext;
     }
     $text .= "</textarea>"
   }
   
-  $text .= "<p>Comment: <input type=text size=30 maxlength=80 name=comment>&nbsp;<input type=\"submit\" name=\"Save\" value=\"Save\"></form>";
+  $text .= qq(<p>Comment: <input type=text size=30 maxlength=60 name=comment value="$comment">&nbsp;);
+  $text .= qq(<input type="submit" name="Save" value="Preview">\n);
+  $text .= qq(<input type="submit" name="Save" value="Save"></fieldset></form>);
 
   $template->param('vroot', $vroot);
   $template->param('title', $uri);
@@ -495,6 +529,16 @@ sub get_lastmod {
 sub view_function {
   my ($r, $uri, $revision) = @_;
   my $mvtime;
+
+  if (not $revision) {
+    $revision = '';
+  }
+  elsif ($revision =~ /^([\d\.]+)$/) {
+  	$revision = $1;
+  }
+  else {
+    return &pretty_error($r, "Invalid revision");
+  }
   
   my $fileuri = uri_to_filename($uri);
 
@@ -507,8 +551,11 @@ sub view_function {
   # If we don't have a checked out file, check it out. Can't really do caching here,
   # as we also deal with multiple revisions of the files. If there is a performance
   # bottleneck here, in the future we may need to look at other means of caching.
-  my $file = rcs_open($r, $fileuri);
-  eval { $file->co("-r$revision"); };
+  my $file;
+  eval { 
+    $file = &rcs_open($r, $fileuri);
+    $file->co("-r$revision"); 
+  };
   if ($@) {
     return fatal_error($r, "Error retriving $fileuri, check revision: $@");
   }
@@ -546,6 +593,17 @@ sub view_function {
     
     if ($dispatch{$uri}) {
 	  my $cachefile = "${datadir}/.${uri}";
+	  if ($uri eq "listchanges") {
+	    # this bit of code is ugly, but I can't think of a nicer flexible way of doing it
+        my %args = $r->args;
+        if ($args{maxpages} !~ /^([\d]+)$/) {
+          $args{maxpages} = 0;
+        }
+        if ($args{maxdays} !~ /^([\d]+)$/) {
+          $args{maxdays} = 0;
+        }
+	    $cachefile .= ".$args{maxdays}.$args{maxpages}";
+	  }
 
       # precaching is when we rely on a cronjob to periodically
 	  # refresh these dispatched pages
@@ -669,7 +727,7 @@ sub render($) {
     }
     $newtext =~ s/\\\[\\\[/\[\[/g;
   
-    $newtext =~ s/-{3,}/<hr>/g;
+    $newtext =~ s/-{3,}/<hr\/>/g;
 
     return $newtext;
 }
@@ -682,17 +740,26 @@ sub diff_function {
   my %args = $r->args;
 
   my (@rev) = grep { defined } @args{qw(rev1 rev2)};
+  for (@rev) {
+    if (/^([0-9\.]+)$/) {
+	  $_ = $1;
+	} else {
+	  &pretty_error($r, "Invalid revision, must be a digit.");
+	}
+  }
 
   if (@rev < 1 or @rev > 2) {
-    return pretty_error($r, "Must supply one or two revisions.");
+    return &pretty_error($r, "Must supply one or two revisions.");
   }
 
-  my $diffformat = $args{m};
-  if ($diffformat ne "c" and $diffformat) {
-    return pretty_error($r, "Diff format must be Context or Normal. $diffformat");
+  my $diffformat = $args{m} || 'u';
+  if ($diffformat =~ /^(c|u)$/) {
+    $diffformat = $1;
+  } else {
+    return &pretty_error($r, "Diff format must be Context or Normal. $diffformat");
   }
 
-  my $rcs = rcs_open($r, $uri);
+  my $rcs = &rcs_open($r, $uri);
   push (@rev, ($rcs->revisions)[0]) if (1 == @rev);
   
   @rev = map {'-r' . $_ } @rev;
@@ -730,7 +797,7 @@ sub log_function {
   
   my $fileuri = uri_to_filename($uri);
 
-  my $obj = rcs_open($r, $fileuri, 1);
+  my $obj = &rcs_open($r, $fileuri, 1);
   my $head_revision = ($obj->revisions)[0];
   my @rlog_complete;
   eval { @rlog_complete = $obj->rlog(); };
@@ -742,7 +809,7 @@ sub log_function {
 
   $logbody = &prettify($logbody);
 
-  $logbody .= qq|<a href="#diff_form">Compare revisions</a><br><br>\n|;
+  $logbody .= qq|<a href="#diff_form">Compare revisions</a><br/><br/>\n|;
 
   my $server = $r->server->server_hostname;
 
@@ -751,7 +818,7 @@ sub log_function {
       next;
     } elsif ($line !~ /:/ && $line !~ /----/ && $line !~ /revision|date/i) {
       chomp($line);
-      $line = "&nbsp;" x 5 . "<i>$line</i><br>\n" if $line;
+      $line = "&nbsp;" x 5 . "<i>$line</i><br/>\n" if $line;
     } elsif ($line !~ /^(revision |date: )/) {
       next;
     } elsif ($line =~ /^revision /) {
@@ -759,13 +826,13 @@ sub log_function {
       $line = qq|<a href="${vroot}/$uri?rev=$revision">View</a> or |;
       $line .= qq|<a href="${vroot}/(diff)/$uri?rev1=$revision">Diff</a> or |;
       $line .= qq|<a href="${vroot}/(revert)/$uri?rev=$revision">Revert</a>  |;
-      $line .= qq|revision $revision:<br>\n|;
+      $line .= qq|revision $revision:<br/>\n|;
       $line .= "&nbsp;" x 5;
     } elsif ($line =~ /date:/ and $line =~ /state:/) {
       $line =~ s/\n|\t//g;
-      $line .= "<br>\n";
+      $line .= "<br/>\n";
     } else {
-      $line .= "<br>";
+      $line .= "<br/>";
     }
     $logbody .= "$line";
   }
@@ -853,7 +920,7 @@ sub diff_form($) {
   my ($uri) = @_;
 
   my $form .= <<END;
-<hr>
+<hr/>
 <a name="#diff_form">
 <form method=get action="$vroot/(diff)/$uri">
 1st revision: <input type=text size=5 name=rev1> 
@@ -862,7 +929,7 @@ Format: <select name=m>
 <option value=>Normal</c>
 <option value=c>Context</c>
 </select>
-<input type=submit value=" Compare "><br>
+<input type=submit value=" Compare "><br/>
 <i>(Leave 2nd revision field blank to compare against latest)</i>
 </form>
 END
@@ -883,14 +950,14 @@ sub get_template {
 <body>
 <TMPL_VAR NAME=BODY>
 <p>
-<hr>
+<hr/>
 <i>This is a default template. For a full example of wiki pages, 
 use those provided in the Apache::MiniWiki distribution.</i>
-<hr>
+<hr/>
 [<a href="<TMPL_VAR NAME=editlink>">Edit</a> | 
 <a href="<TMPL_VAR NAME=loglink>">Archive</a> |
 <a href="<TMPL_VAR NAME=vroot>/">Home</a> ]
-<br><br>
+<br/><br/>
 Last Modified: <TMPL_VAR NAME="lastmod">
 </body></html>
 END_TEMPLATE
@@ -910,7 +977,7 @@ END_TEMPLATE
 	}
   }
     
-  eval { rcs_open($r, $template)->co(); };
+  eval { &rcs_open($r, $template)->co(); };
   return fatal_error($r, "Error retrieving template: $@") if ($@);
   
   return HTML::Template->new(
@@ -945,13 +1012,13 @@ sub get_list {
 	$linklist .= qq|
 		Links: <a href="javascript:showAllLinks()">Expand All</a>, 
 		<a href="javascript:hideAllLinks()">Collapse All</a>
-		<br><br>
+		<br/><br/>
 		|;
   }
 
   foreach my $rawname (@sorted_files) {
     $rawname =~ s/,v$//;
-    $rawname =~ &uri_to_filename($rawname);
+    $rawname = &uri_to_filename($rawname);
     next if ($rawname eq "template" or $rawname =~ /^template-/i);
 	my $title;
 	if (&is_binary($rawname)) {
@@ -959,11 +1026,16 @@ sub get_list {
 	} else {
 		$title = &get_page_title($rawname);
 	}
-    $linklist .= qq|<a id="$rawname">$title</a>: <a href="$vroot/$rawname">view page</a>|;
+	my $a_id = "aa" . encode_entities($rawname); # must start with a letter
+	$a_id =~ s/(\.| )//g; # could result in some dups but that's ok, we need good Id's
+	$title = encode_entities($title);
+    $linklist .= qq|<a id="$a_id">$title</a>: <a href="$vroot/$rawname">view page</a>|;
 	if ($do_externals && !&is_binary($rawname)) {
 		open(IN, '<', "${datadir}/${rawname}");
 		my $text = join("", <IN>);
 		close IN;
+
+		# $r->log_error("doing $rawname");
 
 		my $htmltext = &prettify($text);
 		my $newtext = &render($htmltext);
@@ -975,7 +1047,9 @@ sub get_list {
 		$total_bytes += length($newtext);
 
 		my (@links) = $parser->links;
-		$spanhtml .= qq|<span id="links_${rawname}" style="display:none"><ul>|;
+		my $ul_id = "links_${rawname}";
+		$ul_id =~ s/(\.| )//g; 
+		$spanhtml .= qq|<ul id="$ul_id" style="display:none">\n|;
 		foreach my $link (@links) {
 			my $href = $link->[2];
 			next if ($href =~ /\(edit\)|template-/i or $href eq "${vroot}/template");
@@ -985,6 +1059,8 @@ sub get_list {
 				$href = "#" . &strip_virtual($href);
 				$total_in++;
 			} else {
+				# encode ?, &, etc for XHTML1.1 validator
+				$href = &encode_entities($href);
 				$total_out++;
 			}
 			$spanlinks++;
@@ -994,21 +1070,19 @@ sub get_list {
 			}
 			$spanhtml .= qq|<li><a onClick="checkInLink(this)" href="$href">$display</a></li>\n|;
 		}
-		$spanhtml .= qq|</ul></span>|;
+		$spanhtml .= qq|</ul>|;
 
-		$linklist .= qq|,&nbsp;<a name="expand_link" href="javascript:void(0)" onClick="expand(this, 'links_${rawname}')">view links ($spanlinks)</a><br>|;
+		$linklist .= qq|,&nbsp;<a name="expand_link" href="javascript:void(0)" onClick="expand(this, '$ul_id')">view links ($spanlinks)</a><br/>\n|;
 		$linklist .= $spanhtml;
-
-		$r->log_error("should be done: $rawname");
 		$parser->eof();
 	} else {
-		$linklist .= "<br>\n";
+		$linklist .= "<br/>\n";
 	}
 
   }
 
   if ($do_externals) {
-	$linklist .= "<br><hr>$total_in inside links, $total_out outside links, for a total of $total_bytes bytes of rendered body html.<br>";
+	$linklist .= "<br/><hr/>$total_in inside links, $total_out outside links, for a total of $total_bytes bytes of rendered body html.<br/>";
 	$linklist .= qq|
 		Links: <a href="javascript:showAllLinks()">Expand All</a>, 
 		<a href="javascript:hideAllLinks()">Collapse All</a>
@@ -1053,6 +1127,16 @@ sub get_listchanges {
 
 	my %args = $r->args;
 
+	$args{maxpages} ||= 0;
+	$args{maxdays} ||= 0;
+
+	if ($args{maxpages} !~ /^([\d]+)$/) {
+		$args{maxpages} = 0;
+	}
+	if ($args{maxdays} !~ /^([\d]+)$/) {
+		$args{maxdays} = 0;
+	}
+
 	my $changes = "";
 
 	chdir($datadir);
@@ -1075,7 +1159,7 @@ sub get_listchanges {
 		my $pagelink = $page;
 		$pagelink =~ s/ /%20/g;
 
-		my $obj = rcs_open($r, $page);
+		my $obj = &rcs_open($r, $page);
 
 		my $incomment = 0;
 
@@ -1093,8 +1177,9 @@ sub get_listchanges {
 			elsif ($incomment) {
 				if ($line =~ /^date: /) {
 					my @fields = split ('; ', $line);
-					$datestamp = (split(': ', $fields[0]))[1];
-					$lines = (split(': ', $fields[3]))[1];
+					$datestamp = (split(': ', $fields[0]))[1] if $fields[0];
+					$lines = (split(': ', $fields[3]))[1] if $fields[3];
+					$lines ||= '?';
 				}
 				elsif ($line =~ /^revision 1/) {
 					$revision = $line;
@@ -1127,10 +1212,10 @@ sub get_listchanges {
 
 		$records->{$year}->{$month}->{$day}->{"$time"} = {
 			page => $pagelink,
-			title => $title,
-			comment => $comment,
-			lines => $lines,
-			nicetime => $nicetime
+			title => encode_entities($title),
+			comment => encode_entities($comment),
+			lines => encode_entities($lines),
+			nicetime => encode_entities($nicetime)
 		};
 		$page_counter++;
 		if ($args{maxpages} && ($page_counter >= $args{maxpages})) {
@@ -1150,7 +1235,7 @@ sub get_listchanges {
 			foreach my $day (reverse sort keys %{$records->{$year}->{$month}}) {
 				my $date = &ParseDateString("$year$month$day");
 				$date = &UnixDate($date, "%B %d, %Y");
-				$changes .= "&nbsp;&nbsp;<b><i>$date</i></b><br>\n";
+				$changes .= "&nbsp;&nbsp;<b><i>$date</i></b><br/>\n";
 				foreach my $time (reverse sort keys %{$records->{$year}->{$month}->{$day}}) {
 					my $record = $records->{$year}->{$month}->{$day}->{$time};
 					my $nicetime = $record->{nicetime};
@@ -1162,26 +1247,26 @@ $nicetime <a href="$vroot/$record->{page}">$record->{title}</a>
 					$changes .= qq|Changes:
 						<a href="${vroot}/(log)/$record->{page}">$record->{lines}</a>
 						| if $record->{lines};
-					$changes .= qq|<br>\n|;
+					$changes .= qq|<br/>\n|;
 					$page_counter++;
 					if ($args{maxpages} && ($page_counter >= $args{maxpages})) {
 						goto finish;
 					}
 				}
-				$changes .= "<br>\n";
+				$changes .= "<br/>\n";
 				$day_counter++;
 				if ($args{maxdays} && ($day_counter >= $args{maxdays})) {
 					goto finish;
 				}
 			}
-			$changes .= "\n<hr>\n";
+			$changes .= "\n<hr/>\n";
 		}
 	}
 
 	finish:
 
-	$changes .= "<br>\n";
-	$changes .= "Current date: <b>" . `/bin/date` . "</b><br>\n";
+	$changes .= "<br/>\n";
+	$changes .= "Current date: <b>" . `/bin/date` . "</b><br/>\n";
 
 	return $changes;
 }

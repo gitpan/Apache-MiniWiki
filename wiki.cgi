@@ -1,4 +1,4 @@
-#!/usr/bin/perl -w
+#!/usr/bin/perl -wT
 #
 #  Copyright (C) 2002  Wim Kerkhoff <kerw@cpan.org>
 #
