@@ -27,7 +27,7 @@ use Rcs 1.04;
 
 our ($VERSION, $datadir, $vroot, $authen, $template, $timediff, @templates);
 
-$VERSION = 0.80;
+$VERSION = 0.81;
 
 # Global variables:
 # $datadir:       # Directory where we store Wiki pages (full path)
@@ -91,7 +91,7 @@ sub handler {
   $vroot = $r->dir_config('vroot') or
       return fatal_error($r, "PerlVar vroot must be set.");
   $authen = $r->dir_config('authen') || -1;
-  $timediff = $r->dir_config('timediff') or -8;
+  $timediff = $r->dir_config('timediff') || -8;
   @templates = $r->dir_config->get('templates');
 
   # First strip the virtual root from the URI, then set the URI to
@@ -456,7 +456,7 @@ sub view_function {
     my $newtext = text2html($text, urls => 1, email => 1, bold => 1,
       underline =>1, paras => 1, bullets => 1, numbers=> 1,
       headings => 1, blockcode => 1, tables => 1,
-      title => 1, code => 1);
+	  title => 1, code => 1);
   
     # While the text contains Wiki-style links, we go through each one and
     # change them into proper HTML links.
@@ -604,7 +604,7 @@ sub log_function {
   $logbody = text2html($logbody, urls => 1, email => 1, bold => 1,
         underline =>1, paras => 1, bullets => 1, numbers=> 1,
         headings => 1, blockcode => 1, tables => 1,
-        title => 1, code => 1);
+		title => 1, code => 1);
  
   $logbody .= qq|<a href="#diff_form">Compare revisions</a><br><br>\n|;
 
@@ -663,11 +663,20 @@ sub thumb_function {
 
 	my $fileuri = $datadir . "/" . uri_to_filename($uri);
 	my $thumburi = $datadir . "/THUMB_" . uri_to_filename($uri);
+	
+	my $file_mtime = stat($fileuri)->mtime;
+
+	if (-f $thumburi && stat($thumburi)->mtime > $file_mtime) {
+		# if the thumbnail is newer then the big image,
+		# then obviously a new one hasn't been uploaded. 
+		# Don't call ImageMagick to check the size.
+		# Use the existing thumb.
+		return send_file($r, $thumburi);
+	}
 
 	my $image = Image::Magick->new;
 
 	my ($width, $height, $size, $format) = $image->Ping($fileuri);
-	my $file_mtime = stat($fileuri)->mtime;
 
 	if ($width < $max_width && $height < $max_height) {
 		# don't scale it down
