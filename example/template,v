@@ -1,9 +1,24 @@
-head	1.1;
+head	1.4;
 access;
 symbols;
 locks; strict;
 comment	@# @;
 
+
+1.4
+date	2002.05.24.04.04.31;	author wim;	state Exp;
+branches;
+next	1.3;
+
+1.3
+date	2002.05.24.04.02.06;	author wim;	state Exp;
+branches;
+next	1.2;
+
+1.2
+date	2002.05.24.03.50.34;	author wim;	state Exp;
+branches;
+next	1.1;
 
 1.1
 date	2001.11.03.13.18.56;	author jonas;	state Exp;
@@ -16,12 +31,104 @@ desc
 @
 
 
+1.4
+log
+@*** empty log message ***
+@
+text
+@<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.0 Transitional//EN" "http://www.w3.org/TR/REC-html40/loose.dtd">
+<html>
+<head><title>Example Wiki: <TMPL_VAR NAME=title></title></head>
+<style><!--
+        BODY,A,LI,P,FONT,B,H1,H2,H3,STRONG,TD {
+                font-family:helvetica,arial,tahoma,sans-serif;
+                text-decoration:none;
+        }
+        A,A.link,a.visited,a.active {
+                font-weight:700;
+        }
+        a.active {
+                color:black;
+        }
+        A:hover {
+                text-decoration:underline;
+        }
+        h3 {
+                font-size: 1.3em;
+        }
+--></style>
+<body bgcolor="black">
+
+<TABLE border=1 align=center width="100%" bgcolor="#eaeaea" cellpadding=2 cellspacing=0>
+<tr>
+ <td valign=top align=right bgcolor="#c8d2dc">
+   <a href="<TMPL_VAR NAME=vroot>/">Home</a>,
+   <a href="<TMPL_VAR NAME=vroot>/list">List</a>,
+   <a href="<TMPL_VAR NAME=vroot>/listchanges">Changes</a>,
+   <a href="<TMPL_VAR NAME=vroot>/edit">Help</a>,
+   <a href="<TMPL_VAR NAME=loglink>">Archive</a>,
+   <a href="<TMPL_VAR NAME=vroot>/(newpassword)">Password<sup>1</sup></a>,
+   <a href="<TMPL_VAR NAME=editlink>">Edit</a>
+ </td>
+</tr>
+<tr>
+ <td align=left valign=top>
+  <TMPL_VAR NAME=BODY> 
+<p><hr>
+<sup>1</sup>This will only work if authentification is enabled in
+Apache::MiniWiki. See the POD documentation, or the manual page for
+more information.
+ </td>
+</tr>
+<tr>
+ <td valign=top align=right bgcolor="#c8d2dc">
+   <a href="<TMPL_VAR NAME=vroot>/">Home</a>,
+   <a href="<TMPL_VAR NAME=vroot>/Main">Map</a>,
+   <a href="<TMPL_VAR NAME=vroot>/list">List</a>,
+   <a href="<TMPL_VAR NAME=vroot>/listchanges">Changes</a>,
+   <a href="<TMPL_VAR NAME=vroot>/edit">Help</a>,
+   <a href="<TMPL_VAR NAME=loglink>">Archive</a>,
+   <a href="<TMPL_VAR NAME=vroot>/(newpassword)">Password<sup>1</sup></a>,
+   <a href="<TMPL_VAR NAME=editlink>">Edit</a>
+ </td>
+</tr>
+</TABLE>
+</body></html>
+@
+
+
+1.3
+log
+@*** empty log message ***
+@
+text
+@d32 1
+d39 4
+d53 1
+@
+
+
+1.2
+log
+@*** empty log message ***
+@
+text
+@d30 1
+a30 1
+   <a href="<TMPL_VAR NAME=vroot>/AboutThisWiki">About</a>,
+d46 1
+a46 1
+   <a href="<TMPL_VAR NAME=vroot>/AboutThisWiki">About</a>,
+@
+
+
 1.1
 log
 @Initial revision
 @
 text
-@<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.0 Transitional//EN" "http://www.w3.org/TR/REC-html40/loose.dtd">
+@d2 51
+a52 11
   <html>
     <head><title>Example MiniWiki</title></head>
     <body>

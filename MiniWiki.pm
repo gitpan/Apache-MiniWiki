@@ -1,22 +1,24 @@
 #
+#  Copyright (C) 2002  Wim Kerkhoff <kerw@cpan.org>
 #  Copyright (C) 2001  Jonas Öberg <jonas@gnu.org>
 #
 # This program is free software; you can redistribute it and/or
 # modify it under the same terms as Perl itself.
-#
+
 package Apache::MiniWiki;
 
 use 5.006;
 use strict;
 
-use Apache::Htpasswd;
 use Apache::Constants;
-use CGI;
+use Apache::Htpasswd;
 use HTML::FromText;
 use HTML::Template;
-use Rcs;
+use Date::Manip;
+use CGI;
+use Rcs 1.04;
 
-our $VERSION = 0.20;
+our $VERSION = 0.30;
 
 our $datadir;       # Directory where we store Wiki pages
 our $vroot;         # The virtual root we're using
@@ -27,17 +29,23 @@ our $template_mod;  # Last modified date of currently loaded template
 # This sets the directory where Rcs can find the rcs binaries.
 # Set this to something more sensible if they are located elsewhere.
 Rcs->bindir('/usr/bin');
+Rcs->rcsdir($datadir);
+Rcs->workdir($datadir);
 
 # The function fatal_error is called most commonly when the Apache virtual
 # host has not had the correlt PerlVar's configured.
 sub fatal_error {
-  (my $r, my $text) = @_;
+  my ($r, $text) = @_;
+
+  my $uri = $r->uri;
 
   print <<__EOT__;
 <html>
  <body>
   <h1>Error in Apache::MiniWiki</h1>
-  $text
+  $text<br>
+  <br>
+  While viewing: $uri
  </body>
 </html>
 __EOT__
@@ -77,20 +85,26 @@ sub handler {
   $uri =~ /^\(([a-z]*)\)\/?(.*)/ && do {
       my $function = $1."_function";
       my $retval;
-
-      no strict 'refs';
+  
+      my ($page, $revision);
+  	  ($page, $revision) = split (/\//, $2);
+      
+	  no strict 'refs';
       eval {
-	  $retval = &$function($r, $2 || "index");
+	  $retval = &$function($r, $page || "index", $revision);
       };
       if ($@) {
-	  return fatal_error($r, "Unknown function $function called.");
+	  return fatal_error($r, "Unknown function $function called: $@");
       } else {
 	  return $retval;
       }
   };
+	
+  my ($page, $revision);
+  ($page, $revision) = split (/\//, $uri);
 
   # If we didn't call a function, we assume that we should view a page.
-  return view_function($r, $uri || "index");
+  return view_function($r, $page || "index", $revision);
 }
 
 # This function converts an URI to a filename. It does this by simply
@@ -98,7 +112,7 @@ sub handler {
 # files, regardless of URI, finds themselves in the same directory.
 # If you don't want this, you can always modify this function.
 sub uri_to_filename {
-    (my $uri) = @_;
+    my ($uri) = @_;
 
     $uri =~ tr/\//_/;
     return $uri;
@@ -109,7 +123,7 @@ sub uri_to_filename {
 # and points to a valid htpasswd file which is writeable by the user
 # executing MiniWiki.
 sub newpassword_function {
-  (my $r, my $uri) = @_;
+  my ($r, $uri) = @_;
 
   if ($authen eq -1) {
       return fatal_error($r, "Authentification disabled in Apache::MiniWiki.");
@@ -139,6 +153,8 @@ sub newpassword_function {
   }
 
   my $t = HTML::Template->new( scalarref => \$template );
+  $t->param('vroot', $vroot);
+  $t->param('title', 'New Password');
   $t->param('body', $text);
   print $t->output;
 
@@ -147,17 +163,45 @@ sub newpassword_function {
 
 # This function saves a page submitted by the user into an RCS file.
 sub save_function {
-  (my $r, my $uri) = @_;
+  my ($r, $uri) = @_;
   my $fileuri = uri_to_filename($uri);
+  
+  if ($r->method() ne "POST") {
+    return fatal_error($r, "Invalid Save");
+  }
 
   my $q = new CGI;
   my $text = $q->param('text');
+  my $comment = $q->param('comment');
 
   $text =~ s///g;
   my $user = $r->connection->user || "anonymous";
 
-  my $file = Rcs->new("${datadir}/${fileuri},v");
+  if (length($text) < 5) {
+	return fatal_error($r, "Not enough content");
+  }
+
+  if (not $comment) {
+  	return fatal_error($r, "No comment");
+  }
+
+  my $file = Rcs->new;
   $file->workdir("${datadir}");
+  $file->rcsdir("$datadir");
+  $file->file("$fileuri");
+  $file->arcfile("$fileuri,v");
+
+  if (-f "${datadir}/${fileuri}" && $file->lock) {
+  	# previous locks exist, removing.
+	# Is this good?
+    eval {
+			$file->ci('-u', '-w'.$user);
+		};
+		if ($@) {
+			return fatal_error ($r, "Could not unlock $fileuri: $@");
+		}
+	#return fatal_error($r, "Page $fileuri is already locked");
+  }
 
   if (-f "${datadir}/${fileuri},v") {
     $file->co('-l');
@@ -167,16 +211,75 @@ sub save_function {
   print OUT $text;
   close OUT;
 
-  $file->ci('-u', '-w'.$user);
+  $file->ci('-u', '-w'.$user, "-m$comment");
 
-  my $newtext = "A verbatim copy of the text stored in the database is appended below.<p>";
+  return &view_function($r, $uri, undef);
+}
+
+# This function reverts a page back to the specified version if possible.
+sub revert_function {
+  my ($r, $uri, $revision) = @_;
+
+  my $fileuri = uri_to_filename($uri);
+	
+  my $user = $r->connection->user || "anonymous";
+
+  my %args = $r->args;
+
+  if (!$args{doit}) {
+  	warn "go away, bot!";
+    return fatal_error($r, 
+	  "Bots are not allowed to follow the revert links!" .
+	  " If you are a human, add ?doit=1 to the url to revert."
+	  );
+  }
+  
+  my $file = Rcs->new;
+  $file->workdir("${datadir}");
+  $file->rcsdir("$datadir");
+  $file->file("$fileuri");
+  $file->arcfile("$fileuri,v");
+
+  if (! -f "${datadir}/${fileuri},v") {
+    return fatal_error($r, "Page $fileuri,v does not exist at all");
+  }
+
+  # remove working copies, in case they are bad
+  unlink("$datadir/$fileuri");
+
+  chdir ($datadir);
+  eval { $file->co('-l'); };
+  if ($@) {
+    return fatal_error($r, "Error retriving latest page, check revision");
+  }
+
+  # calculate the latest version, needed to undo.
+  my $head_version = ($file->revisions)[0];
+ 
+  $file->arcext('');
+  eval { 
+	chdir ($datadir);
+    $file->rcsmerge("-r$head_version", "-r$revision"); 
+  };
+  if ($@) {
+    return fatal_error($r, "Error merging: $!, $?, $@");
+  }
+  $file->arcext(',v');
+
+  eval { $file->ci('-u', '-w'.$user); };
+  if ($@) {
+    return fatal_error($r, "Error reverting");
+  }
+
+  my $newtext = "The page has been reverted to revision $revision.<p>";
   $newtext .= "[<a href=\"${vroot}\/${uri}\">Return</a>]<p><hr>";
-  $text =~ s/</&lt;/g;
-  $text =~ s/>/&gt;/g;
-  $newtext .= "<pre>$text</pre>\n";
 
   my $t = HTML::Template->new( scalarref => \$template );
+  $t->param('vroot', $vroot);
+  $t->param('title', $uri);
   $t->param('body', $newtext);
+  $t->param('editlink', "$vroot/\(edit\)\/$uri");
+  $t->param('loglink', "$vroot/\(log\)\/$uri");
   print $t->output;
 
   return OK;
@@ -185,7 +288,7 @@ sub save_function {
 # The edit function checks out a page from RCS and provides a text
 # area for the user where he or she can edit the content.
 sub edit_function {
-  (my $r, my $uri) = @_;
+  my ($r, $uri) = @_;
 
   my $fileuri = uri_to_filename($uri);
 
@@ -196,7 +299,7 @@ sub edit_function {
   }
 
   my $text = "<form method=\"post\" action=\"${vroot}/(save)${uri}\">\n";
-  $text .= "<textarea name=\"text\" cols=80 rows=25>\n";
+  $text .= "<textarea name=\"text\" cols=80 rows=25 wrap=virtual>\n";
   if (-f "${datadir}/${fileuri},v") {
     open(IN, '<', "${datadir}/${fileuri}");
     my $cvstext .= join(/\n/, <IN>);
@@ -204,10 +307,14 @@ sub edit_function {
     $cvstext =~ s/>/&gt;/g;
     $text .= $cvstext;
   }
-  $text .= "</textarea><p><input type=\"submit\" name=\"Submit\"></form>";
+  $text .= "</textarea><p>Comment: <input type=text size=30 maxlength=80 name=comment>&nbsp;<input type=\"submit\" name=\"Save\"></form>";
 
   my $t = HTML::Template->new( scalarref => \$template );
+  $t->param('vroot', $vroot);
+  $t->param('title', $uri);
   $t->param('body', $text);
+  $t->param('editlink', "$vroot/\(edit\)\/$uri");
+  $t->param('loglink', "$vroot/\(log\)\/$uri");
 
   print $t->output;
   return OK;
@@ -216,9 +323,9 @@ sub edit_function {
 # This function is the standard viewer. It loads a file and displays it
 # to the user.
 sub view_function {
-  (my $r, my $uri) = @_;
+  my ($r, $uri, $revision) = @_;
   my $mvtime; my $mtime;
-
+  
   my $fileuri = uri_to_filename($uri);
 
   # If the file doesn't exist as an RCS file, then we return NOT_FOUND to
@@ -227,13 +334,17 @@ sub view_function {
     return NOT_FOUND;
   }
 
-  # If we don't have a checked out file, or if the RCS file is newer
-  # than the checked out copy, we check out a fresh copy.
-  if ( (! -f "${datadir}/${fileuri}") ||
-       (-M "${datadir}/${fileuri},v" gt -M "${datadir}/${fileuri}")) {
-      my $file = Rcs->new("${datadir}/${fileuri},v");
-      $file->workdir("${datadir}");
-      $file->co;
+  # If we don't have a checked out file, check it out. Can't really do caching here,
+  # as we also deal with multiple revisions of the files. If there is a performance 
+  # bottleneck here, in the future we may need to look at other means of caching.
+  my $file = Rcs->new;
+  $file->workdir("${datadir}");
+  $file->rcsdir("$datadir");
+  $file->file("$fileuri");
+  $file->arcfile("$fileuri,v");
+  eval { $file->co("-r$revision"); };
+  if ($@) {
+    return fatal_error($r, "Error retriving specified page, check revision");
   }
 
   open(IN, '<', "${datadir}/${fileuri}");
@@ -245,13 +356,17 @@ sub view_function {
   # these settings.
   my $newtext = text2html($text, urls => 1, email => 1, bold => 1,
 			  underline =>1, paras => 1, bullets => 1, numbers=> 1,
-			  headings => 1, blockquotes => 1, tables => 1,
-			  title => 1);
+			  headings => 1, blockcode => 1, tables => 1,
+			  title => 1, code => 1);
 
   # While the text contains Wiki-style links, we go through each one and
   # change them into proper HTML links.
   while ($newtext =~ /\[\[([^\]|]*)\|?([^\]]*)\]\]/) {
     my $rawname = $1;
+	my $revision;
+	if ($rawname =~ /\//) {
+		($rawname, $revision) = split (/\//, $rawname);
+	}
     my $desc = $2 || $rawname;
     my $tmplink;
 
@@ -259,9 +374,9 @@ sub view_function {
     $tmppath =~ s/^_//;
 
     if (-f "${datadir}/$tmppath,v") {
-      $newtext =~ s/\[\[[^\]]*\]\]/<a href="${vroot}\/${rawname}">$desc<\/a>/;
+      $newtext =~ s/\[\[[^\]]*\]\]/<a href="${vroot}\/${rawname}\/$revision">$desc<\/a>/;
     } else {
-      $tmplink = "$desc <a style=\"text-decoration :none\" href=\"${vroot}\/(edit)/${rawname}\"><sup>?<\/sup><\/a>";
+      $tmplink = "$desc <a href=\"${vroot}\/(edit)/${rawname}\"><sup>?<\/sup><\/a>";
       $newtext =~ s/\[\[[^\]]*\]\]/$tmplink/;
     }
   }
@@ -269,22 +384,104 @@ sub view_function {
 
   $newtext =~ s/-{3,}/<hr>/g;
 
+  my %dispatch = (
+  	list => \&get_list,
+	listchanges => \&get_listchanges
+  );
+
+  if ($dispatch{$uri}) {
+    $newtext .= $dispatch{$uri}($r);
+  }
+
   my $t = HTML::Template->new( scalarref => \$template );
+  $t->param('vroot', $vroot);
+  $t->param('title', $uri);
   $t->param('body', $newtext);
   $t->param('editlink', "$vroot/\(edit\)\/$uri");
+  $t->param('loglink', "$vroot/\(log\)\/$uri");
 
   print $t->output;
 
   return OK;
 }
 
+# This function dumps out the log list for the file, so that the user can view
+# any past version of the file.
+sub log_function {
+  my ($r, $uri) = @_;
+  Rcs->arcext(''); 
+  my $obj = Rcs->new("$datadir/$uri,v");
+  $obj->workdir("$datadir");
+  my @rlog_complete = $obj->rlog;
+
+  my $logbody = "History for $uri\n\n";
+  
+  $logbody = text2html($logbody, urls => 1, email => 1, bold => 1,
+			  underline =>1, paras => 1, bullets => 1, numbers=> 1,
+			  headings => 1, blockcode => 1, tables => 1,
+			  title => 1, code => 1);
+
+  my $server = $r->server->server_hostname;
+
+  foreach my $line (@rlog_complete) {
+	if ($line =~ /Initial checkin|empty log message|=============/) {
+		next;
+	}
+	elsif ($line !~ /:/ && $line !~ /----/ && $line !~ /revision|date/i) {
+	   chomp($line);
+	   $line = "&nbsp;" x 5 . "<i>$line</i><br>\n" if $line;
+	}
+	elsif ($line !~ /^(revision |date: )/) {
+		next;
+	}
+	elsif ($line =~ /^revision /) {
+		my ($word, $revision) = split (' ', $line);
+		$line = qq|<a href="${vroot}/$uri/$revision">View</a> or |;
+		$line .= qq|<a href="${vroot}/(revert)/$uri/$revision">Revert</a>  |;
+		$line .= qq|revision $revision: |;
+	}
+	else {
+		$line .= "<br>\n";
+	}
+	$logbody .= "\n$line";
+  }
+  
+  my $t = HTML::Template->new( scalarref => \$template );
+  $t->param('vroot', $vroot);
+  $t->param('title', $uri);
+  $t->param('body', $logbody);
+  $t->param('editlink', "$vroot/\(edit\)\/$uri");
+  $t->param('loglink', "$vroot/\(log\)\/$uri");
+
+  print $t->output;
+
+  return OK;
+
+}
+
 # This function loads the template, if one exists. If there is no template,
 # then a default template consisting of just a plain body is used.
 sub load_template {
+	my ($r) = @_;
+
     my $mtime;
 
     if (! -f "${datadir}/template,v") {
-      $template = "<html><body><TMPL_VAR NAME=BODY><p><hr>[<a href=\"<TMPL_VAR NAME=editlink>\">Edit</a>]</body></html>";
+      $template = <<END_TEMPLATE;
+<html>
+<head><title>Default Wiki: <TMPL_VAR NAME=title></title></head>
+<body>
+<TMPL_VAR NAME=BODY>
+<p>
+<hr>
+This is a default template. For a full example of wiki pages, use those provided in the Apache::MiniWiki distribution.
+
+See the archive: <a href="<TMPL_VAR NAME=loglink>">Archive</a>.
+
+<hr>
+[<a href="<TMPL_VAR NAME=editlink>">Edit</a> | <a href="<TMPL_VAR NAME=vroot>">Home</a> ]
+</body></html>
+END_TEMPLATE
       return;
     }
 
@@ -292,9 +489,15 @@ sub load_template {
      undef, undef, undef) = stat("${datadir}/template,v");
 
     if ($mtime gt $template_mod) {
-      my $file = Rcs->new("${datadir}/template,v");
+      my $file = Rcs->new;
       $file->workdir("${datadir}");
-      $file->co;
+      $file->rcsdir("$datadir");
+      $file->file("template");
+      $file->arcfile("template,v");
+      eval { $file->co(); };
+      if ($@) {
+        return fatal_error($r, "Error retriving template");
+      }
       open(IN, '<', "${datadir}/template");
       $template = join(/\n/, <IN>);
       close IN;
@@ -302,7 +505,176 @@ sub load_template {
     }
 }
 
+# This function lists all files in the data directory
+# and returns an HTML formatted list of links.
+sub get_list {
+	my $linklist = "";
+
+	chdir ($datadir);
+
+	# get the list of files...
+	my @files = <*,v>;
+
+	# sort them 
+	my @sorted_files = sort {uc($a) cmp uc($b)} @files;
+	
+	foreach my $rawname (@sorted_files) {
+		$rawname =~ s/,v$//;
+		$rawname =~ s/^\///g;
+		next if ($rawname eq "template");
+		$linklist .= qq|<a href="$vroot/$rawname">$rawname</a><br>\n|;
+	}
+	
+	return $linklist;
+}
+
+# This function does up a pretty list of all the changes in the
+# Wiki, and returns the HTML for it.
+# Does checks for ?maxdays=x&maxpages=y
+sub get_listchanges {
+	my $r = shift;
+
+	my %args = $r->args;
+
+	my $changes = "";
+
+	chdir($datadir);
+  
+	Rcs->arcext(''); 
+
+	# all the page changes get stored in a big hash
+	# by year, then month, then day. This allows us much better
+	# control when laying it out.
+	my $records = {};
+	
+	open (LS, "/bin/ls -1at *,v | grep -v template,v |")
+	 || return fatal_error($r, "Could not get a listing: $!");
+	
+	while (my $page = (<LS>)) {
+		chomp ($page);
+		$page =~ s/,v$//g;
+
+		my $rcsfile = $page;
+		$rcsfile =~ s| |\\ |g;
+
+		my $pagelink = $page;
+		$pagelink =~ s/ /\%20/g;
+	
+		my $obj = Rcs->new("$datadir/$rcsfile,v");
+		$obj->workdir("$datadir");
+
+		my $incomment = 0;
+
+		# parse the meta information
+		my ($revision, $datestamp, $comment, $lines, $title); 
+		foreach my $line ($obj->rlog("-r")) {
+			chomp ($line);
+
+			if ($line =~ /------------/) {
+				$incomment = 1;
+			}
+			elsif ($line =~ /============/) {
+				$incomment = 0;
+			}
+			elsif ($incomment) {
+				if ($line =~ /^date: /) {
+					my @fields = split ('; ', $line);
+					$datestamp = (split(': ', $fields[0]))[1];
+					$lines = (split(': ', $fields[3]))[1];
+				}
+				elsif ($line =~ /^revision 1/) {
+					$revision = $line;
+					$revision =~ s/^revision 1//g;
+				}
+				elsif ($line !~ /empty log message/) {
+					$comment .= $line;
+				}
+			}
+		}
+
+		# obtain the title of the page, which should be the
+		# first line of the page normally.
+		my $working_file = $rcsfile;
+		open (FILE, "< $datadir/$working_file") || 
+			next;
+		while ($title = (<FILE>)) {
+			last if ($title);
+			$r->log_error($title)
+		}
+		close (FILE);
+		
+		$title ||= $page;
+
+		# no wiki words
+		$title =~ s/\[|\]//g;
+
+		$lines =~ s/ /\//;
+
+		$comment = ucfirst($comment);
+
+		my ($date, $time) = split (/\ /, $datestamp);
+		my ($year, $month, $day) = split (/\//, $date);
+
+		$records->{$year}->{$month}->{$day}->{"$time"} = {
+			page => $pagelink,
+			title => $title,
+			comment => $comment,
+			lines => $lines
+		};
+	}
+	close (LS);
+
+	my $day_counter = 0;
+	my $page_counter = 0;
+
+	foreach my $year (reverse sort keys %{$records}) {
+		foreach my $month (reverse sort keys %{$records->{$year}}) {
+			foreach my $day (reverse sort keys %{$records->{$year}->{$month}}) {
+				my $date = &ParseDateString("$year$month$day");
+				$date = &UnixDate($date, "%B %d, %Y");
+				$changes .= "&nbsp;&nbsp;<b><i>$date</i></b><br>\n";
+				foreach my $time (reverse sort keys %{$records->{$year}->{$month}->{$day}}) {
+					my $record = $records->{$year}->{$month}->{$day}->{$time};
+					my $nicetime = "$year$month$day$time";
+					$nicetime =~ s/://g;
+					$nicetime = &ParseDateString($nicetime);
+					my $delta = &ParseDateDelta("- 7 hours");
+					$nicetime = &DateCalc($nicetime, $delta);
+					$nicetime = &UnixDate($nicetime, "%H:%M %p");
+					$changes .= qq|
+&nbsp;&nbsp;&nbsp;
+$nicetime <a href="$vroot/$record->{page}">$record->{title}</a>
+					|;
+					$changes .= qq| - $record->{comment}. | if $record->{comment};
+					$changes .= qq|Changes:
+						<a href="${vroot}/(log)/$record->{page}">$record->{lines}</a>
+						| if $record->{lines};
+					$changes .= qq|<br>\n|;
+					$page_counter++;
+					if ($args{maxpages} && ($page_counter >= $args{maxpages})) {
+						goto finish;
+					}
+				}
+				$changes .= "<br>\n";
+				$day_counter++;
+				if ($args{maxdays} && ($day_counter >= $args{maxdays})) {
+					goto finish;
+				}
+			}
+			$changes .= "\n<hr>\n";
+		}
+	}
+
+	finish:
+
+	$changes .= "<br>\n";
+	$changes .= "Current date: <b>" . `/bin/date` . "</b><br>\n";
+
+	return $changes;
+}
+
 1;
+
 __END__
 
 =head1 NAME
@@ -324,13 +696,31 @@ Apache::MiniWiki - Miniature Wiki for Apache
      Require valid-user
   </Location>
 
+=head1 DEPENDENCIES
+
+This module requires these other modules:
+
+  Apache::Htpasswd;
+  Apache::Constants;
+  CGI;
+  HTML::FromText;
+  HTML::Template;
+  Rcs;
+
 =head1 DESCRIPTION
 
-Apache::MiniWiki is an increadibly simplistic Wiki for Apache. It doesn't
+Apache::MiniWiki is an simplistic Wiki for Apache. It doesn't
 have much uses besides very simple installations where hardly any features
-are needed. What is does support though is; storage of Wiki pages in RCS,
-templates through HTML::Template, text to HTML conversion with
-HTML::FromText and basic authentification password changes.
+are needed. What is does support though is:
+
+  - storage of Wiki pages in RCS
+  - templates through HTML::Template
+  - text to HTML conversion with HTML::FromText
+  - basic authentification password changes
+  - ability to view any revision of a page
+  - ability to revert back to any revision of the page
+  - basic checks to keep search engine spiders from deleting 
+    all the pages in the Wiki!!!
 
 If you want to use your own template for MiniWiki, you should place the
 template in the RCS file template,v in the C<datadir>. Upon execution,
@@ -352,14 +742,46 @@ If this variable is set, it should point to a standard htpasswd file
 which MiniWiki has write access to. The function to change a users password
 is then enabled.
 
+If you create the pages 'list' or 'listchanges', the following will
+automatically get appended to them:
+
+ - list:        A simple line deliminated list of 
+                all the pages in the system
+
+ - listchanges: Ordered by date, gives a list of all pages 
+                including the last comment, the number of lines 
+                added or removed, and the date of the last change
+
+To keep things sane and reasonable, the master 'template' page does not
+show up in any of these three page listings.
+
+Spiders for search engines (Google, OpenFind, etc) love the 
+bounty of links found in a Wiki. Unfortunely, they also follow
+the Archive, Changes, View, and Revert links. This not only
+adds to the load on your webserver, but there is a very high
+chance that pages will get rolled back as the spider
+goes in circles following links. This has happened! Add
+these links to your robots.txt so that robots can
+only view the actual current pages:
+
+Disallow: /wiki/(edit)/
+Disallow: /wiki/(log)/
+Disallow: /wiki/(revert)/
+Disallow: /wiki/(save)/
+Disallow: /wiki/(view)/
+Disallow: /wiki/lastchanges
+
+See http://www.nyetwork.org/wiki for an example of 
+this module in active use.
 
 =head1 AUTHOR
 
 Jonas Oberg, E<lt>jonas@gnu.orgE<gt>
+Wim Kerkhoff, E<lt>kerw@cpan.orgE<gt>
 
 =head1 SEE ALSO
 
-L<perl>, L<HTML::FromText>, L<HTML::Template>.
+L<perl>, L<HTML::FromText>, L<HTML::Template>, L<Rcs>, L<CGI>.
 
 =cut
 

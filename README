@@ -1,47 +1,95 @@
-Apache::MiniWiki version 0.20
-=============================
+NAME
+    Apache::MiniWiki - Miniature Wiki for Apache
 
-Apache::MiniWiki is an increadibly simplistic Wiki server for Apache.
+SYNOPSIS
+      <Location /wiki>
+         PerlAddVar datadir "/home/foo/db/wiki/"
+         PerlAddVar vroot "/wiki"
+         PerlAddVar authen "/home/foo/db/htpasswd"
+         SetHandler perl-script
+         PerlHandler Apache::MiniWiki
 
-INSTALLATION
-
-To install this module type the following:
-
-   perl Makefile.PL
-   make
-   make install
-
-Then configure your Apache server by putting something like this
-in its configuration:
-
-  <Location /wiki>
-     PerlAddVar datadir "/home/foo/db/wiki/"
-     PerlAddVar vroot "/wiki"
-     SetHandler perl-script
-     PerlHandler Apache::MiniWiki
-  </Location>
-
-The datadir should point to a directory where Apache can write.
-The vroot should match the <Location>. You should then visit
-the URL http://server.name/wiki/(edit)/index to create a first
-index page. An example datadir is included in the distribution
-in the directory example/ which you can use if you wish.
+         AuthType Basic
+         AuthName "Sample Wiki"
+         AuthUserFile /home/foo/db/htpasswd 
+         Require valid-user
+      </Location>
 
 DEPENDENCIES
+    This module requires these other modules:
 
-This module requires these other modules:
+      Apache::Htpasswd;
+      Apache::Constants;
+      CGI;
+      HTML::FromText;
+      HTML::Template;
+      Rcs;
 
-  Apache::Htpasswd;
-  Apache::Constants;
-  CGI;
-  HTML::FromText;
-  HTML::Template;
-  Rcs;
+DESCRIPTION
+    Apache::MiniWiki is an simplistic Wiki for Apache. It doesn't have much
+    uses besides very simple installations where hardly any features are
+    needed. What is does support though is:
 
-COPYRIGHT AND LICENCE
+      - storage of Wiki pages in RCS
+      - templates through HTML::Template
+      - text to HTML conversion with HTML::FromText
+      - basic authentification password changes
+      - ability to view any revision of a page
+      - ability to revert back to any revision of the page
+      - basic checks to keep search engine spiders from deleting 
+        all the pages in the Wiki!!!
 
-  Copyright (C) 2001  Jonas Oberg
+    If you want to use your own template for MiniWiki, you should place the
+    template in the RCS file template,v in the "datadir". Upon execution,
+    MiniWiki will check out this template and use it. If you make any
+    modifications to the RCS file, a new version will be checked out.
 
-  This program is free software; you can redistribute it and/or
-  modify it under the same terms as Perl itself.
+    You can modify the template from within MiniWiki by visiting the URL
+    http://your.server.name/your-wiki-vroot/(edit)/template
+
+    If you don't install a template, a default one will be used.
+
+    The "datadir" variable defines where in the filesystem that the RCS
+    files that MiniWiki uses should be stored. This is also where MiniWiki
+    looks for a template to use.
+
+    The "vroot" should match the virtual directory that MiniWiki runs under.
+
+    If this variable is set, it should point to a standard htpasswd file
+    which MiniWiki has write access to. The function to change a users
+    password is then enabled.
+
+    If you create the pages 'list' or 'listchanges', the following will
+    automatically get appended to them:
+
+     - list:        A simple line deliminated list of 
+                    all the pages in the system
+
+     - listchanges: Ordered by date, gives a list of all pages 
+                    including the last comment, the number of lines 
+                    added or removed, and the date of the last change
+
+    To keep things sane and reasonable, the master 'template' page does not
+    show up in any of these three page listings.
+
+    Spiders for search engines (Google, OpenFind, etc) love the bounty of
+    links found in a Wiki. Unfortunely, they also follow the Archive,
+    Changes, View, and Revert links. This not only adds to the load on your
+    webserver, but there is a very high chance that pages will get rolled
+    back as the spider goes in circles following links. This has happened!
+    Add these links to your robots.txt so that robots can only view the
+    actual current pages:
+
+    Disallow: /wiki/(edit)/ Disallow: /wiki/(log)/ Disallow: /wiki/(revert)/
+    Disallow: /wiki/(save)/ Disallow: /wiki/(view)/ Disallow:
+    /wiki/lastchanges
+
+    See http://www.nyetwork.org/wiki for an example of this module in active
+    use.
+
+AUTHOR
+    Jonas Oberg, <jonas@gnu.org> Wim Kerkhoff, <kerw@cpan.org>
+
+SEE ALSO
+    perl, HTML::FromText, HTML::Template, Rcs, CGI.
 

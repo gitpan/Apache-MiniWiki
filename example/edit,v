@@ -1,10 +1,14 @@
-head	1.1;
+head	1.2;
 access;
 symbols;
-locks
-	jonas:1.1; strict;
+locks; strict;
 comment	@# @;
 
+
+1.2
+date	2002.05.24.04.01.02;	author wim;	state Exp;
+branches;
+next	1.1;
 
 1.1
 date	2001.11.03.13.19.41;	author jonas;	state Exp;
@@ -17,9 +21,9 @@ desc
 @
 
 
-1.1
+1.2
 log
-@Initial revision
+@*** empty log message ***
 @
 text
 @Writing pages
@@ -32,10 +36,21 @@ The following is true for all pages:
 
  * The first line on any page will always become a header
  * If you wish to link to other pages, you can write links like this: \[\[Pagename|Description]]. For example, to make a link to the main page (index), you can write: \[\[index|Main page]].
- * You can create *bold* och _underlined_ text by putting * or _ on both sides of a text.
+ * You can create *bold* or _underlined_ text by putting * or _ on both sides of a text.
  * Unnumbered lists (like this) is written by putting *, in front of all rows.
  * Numbered lists are written by putting a number (1, 2, 3...) in front of every row.
  * Three dashes or more after each other produces a horizontal line across the page.
 
 If someone creates a link to a page that doesn't exist yet, it will be shown by a small questionmark following the description. By pressing the questionmark, a blank page is received where one can create the page.
+@
+
+
+1.1
+log
+@Initial revision
+@
+text
+@d11 1
+a11 1
+ * You can create *bold* och _underlined_ text by putting * or _ on both sides of a text.
 @
