@@ -11,5 +11,5 @@ WriteMakefile(
 			     'Apache::Htpasswd' => 0 },
     ($] >= 5.005 ?
       (ABSTRACT_FROM => 'MiniWiki.pm', # retrieve abstract from module 
-       AUTHOR     => 'Jonas Oberg <jonas@gnu.org>, Wim Kerkhoff <kerw@cpan.org>') : ()),
+       AUTHOR     => 'Jonas Oberg <jonas@gnu.org>, Wim Kerkhoff <kerw@cpan.org>, James Farrell <jfarrell@telesterion.org>') : ()),
 );
