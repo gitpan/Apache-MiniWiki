@@ -7,6 +7,6 @@ use Test::Simple tests => 1;
 
 use Apache::MiniWiki;
 
-ok ($Apache::MiniWiki::VERSION >= 0.6, "loaded Apache::MiniWiki >= 0.6");
+ok ($Apache::MiniWiki::VERSION >= 0.8, "loaded Apache::MiniWiki >= 0.8");
 
 

@@ -1,9 +1,12 @@
 #
-#  Copyright (C) 2002  Wim Kerkhoff <kerw@cpan.org>
-#  Copyright (C) 2001  Jonas Öberg <jonas@gnu.org>
+# Copyright (C) 2002  Wim Kerkhoff <kerw@cpan.org>
+# Copyright (C) 2001  Jonas Öberg <jonas@gnu.org>
 #
-# This program is free software; you can redistribute it and/or
-# modify it under the same terms as Perl itself.
+# All rights reserved.
+#
+# You may distribute under the terms of either the GNU
+# General Public License (see License.GPL) or the Artistic License
+# (see License.Artistic).
 
 package Apache::MiniWiki;
 
@@ -11,23 +14,36 @@ use 5.006;
 use strict;
 
 use Apache::Constants;
+use Apache::File;
 use Apache::Htpasswd;
+use Carp;
+use CGI;
+use Date::Manip;
+use File::stat;
 use HTML::FromText;
 use HTML::Template;
-use Date::Manip;
-use CGI;
+use Image::Magick;
 use Rcs 1.04;
-use File::stat;
 
-use vars qw($VERSION $datadir $vroot $authen $template);
+our ($VERSION, $datadir, $vroot, $authen, $template, $timediff, @templates);
 
-$VERSION = 0.70;
+$VERSION = 0.80;
 
 # Global variables:
 # $datadir:       # Directory where we store Wiki pages (full path)
 # $vroot:         # The virtual root we're using (eg /wiki)
 # $authen:        # Set to filename when using basic authentification
 # $template:      # HTML::Template object
+# $timediff:      # delta from GMT, eg:  -8 for PST, +4.5 for IST
+# @templates:     # list of templates to use for other entry pages
+
+# Global variables containing the recognized file extensions
+# for images and binary files.
+our @imgfmts = qw ( jpg jpeg gif png );
+our @binfmts = ( @imgfmts, qw ( pdf doc ps gz zip ) );
+
+# global variables to set thumbnail cutoff
+our ($max_width, $max_height) = (600,400);
 
 # This sets the directory where Rcs can find the rcs binaries.
 # Set this to something more sensible if they are located elsewhere.
@@ -64,7 +80,10 @@ sub handler {
   my $r = shift;
 
   # All information we send is of type text/html
-  $r->send_http_header('text/html');
+  # But this is no longer the case, since we are now sending images
+  # and binary files as well, so we can't do this here, but instead have
+  # to be more careful.
+  # $r->send_http_header('text/html');
 
   # Load configuration directives.
   $datadir = $r->dir_config('datadir') or
@@ -72,6 +91,8 @@ sub handler {
   $vroot = $r->dir_config('vroot') or
       return fatal_error($r, "PerlVar vroot must be set.");
   $authen = $r->dir_config('authen') || -1;
+  $timediff = $r->dir_config('timediff') or -8;
+  @templates = $r->dir_config->get('templates');
 
   # First strip the virtual root from the URI, then set the URI to
   my ($uri) = ($r->uri =~ m/${vroot}\/?(.*)/i);
@@ -88,30 +109,23 @@ sub handler {
   $r->no_cache(1);
 
   # We call the appropriate functions to perform a task if the
-  # URI that the user sent contains "(function)" as an element.
-  $uri =~ /^\(([a-z]*)\)\/?(.*)/ && do {
-      my $function = $1."_function";
-      my $retval;
-  
-      my ($page, $revision);
-  	  ($page, $revision) = split (/\//, $2);
-      
-	  no strict 'refs';
-      eval {
-       $retval = &$function($r, $page || "index", $revision);
-      };
-      if ($@) {
-        return fatal_error($r, "Unknown function $function called: $@");
-      } else {
-        return $retval;
-      }
-  };
-	
-  my ($page, $revision);
-  ($page, $revision) = split (/\//, $uri);
+  # URI that the user sent contains "(function)" as an element,
+  # otherwise, call the default, view_function.
+  my $function = "view_function";
+  $uri =~ m{^\(([a-z]*)\)/?(.*)} and $function = "$1_function";
 
-  # If we didn't call a function, we assume that we should view a page.
-  return view_function($r, $page || "index", $revision);
+  my %args = $r->args;
+  my $revision = $args{rev};
+  my $page = $2 || $uri;
+      
+  my $retval;
+  eval {
+    no strict 'refs';
+    $retval = &$function($r, $page || "index", $revision);
+  };
+  
+  if ($@) { return fatal_error($r, "Unknown function $function called: $@"); }
+  else { return $retval; }
 }
 
 # This function converts an URI to a filename. It does this by simply
@@ -121,6 +135,7 @@ sub handler {
 sub uri_to_filename {
     my ($uri) = @_;
 
+	$uri =~ s/(\/)$//g;
     $uri =~ tr/\//_/;
     return $uri;
 }
@@ -131,14 +146,14 @@ sub uri_to_filename {
 # Rcs object is returned, ready to be used for rcsdiff, etc.
 # locking must be handled by the calling function.
 sub rcs_open {
-	my ($r, $file) = @_;
+  my ($r, $file) = @_;
 
-	my $obj = Rcs->new;
-	$obj->rcsdir($datadir);
-	$obj->workdir($datadir);
-	$obj->file($file);
+  my $obj = Rcs->new;
+  $obj->rcsdir($datadir);
+  $obj->workdir($datadir);
+  $obj->file($file);
 
-	$obj;
+  $obj;
 }
 
 # This function allows the user to change his or her password, if
@@ -149,31 +164,31 @@ sub newpassword_function {
   my ($r, $uri) = @_;
 
   if ($authen eq -1) {
-      return fatal_error($r, "Authentification disabled in Apache::MiniWiki.");
+    return fatal_error($r, "Authentification disabled in Apache::MiniWiki.");
   }
 
   my $q = new CGI;
   my $text;
 
   if ($q->param() && ($q->param('password1') eq $q->param('password2'))) {
-      my $pass1 = $q->param('password1');
-      $pass1 =~ s///g;
-      eval {
-	  my $htp = new Apache::Htpasswd($authen);
-	  $htp->htpasswd($r->connection->user, $pass1, 1);
-      };
-      if ($@) {
-	  return fatal_error($r, "$@");
-      }
-      $text = "Password changed.\n";
+    my $pass1 = $q->param('password1');
+    $pass1 =~ s/\r//g;
+    eval {
+      my $htp = new Apache::Htpasswd($authen);
+      $htp->htpasswd($r->connection->user, $pass1, 1);
+    };
+    if ($@) {
+      return fatal_error($r, "$@");
+    }
+    $text = "Password changed.\n";
   } elsif ($q->param() && ($q->param('password1') ne $q->param('password2'))) {
-      $text = "The passwords doesn't match each other.\n";
+    $text = "The passwords doesn't match each other.\n";
   } else {
-      $text = <<END;
+    $text = <<END;
 <form method="post" action="${vroot}/(newpassword)">
-	New password: <input type="password" name="password1"><br>
-	Again: <input type="password" name="password2"><p>
-	<input type="submit" name="Change">
+ New password: <input type="password" name="password1"><br>
+ Again: <input type="password" name="password2"><p>
+ <input type="submit" name="Change">
 </form>
 END
   }
@@ -182,6 +197,8 @@ END
   $template->param('title', 'New Password');
   $template->param('body', $text);
   ##$template->param("lastmod", "");
+  
+  $r->send_http_header('text/html');
   print $template->output;
 
   return OK;
@@ -197,10 +214,19 @@ sub save_function {
   }
 
   my $q = new CGI;
-  my $text = $q->param('text');
-  my $comment = $q->param('comment');
 
-  $text =~ s///g;
+  my $text;
+  # is this an uploaded binary file? If so, shlurp the data from
+  # the file handle provided by CGI.pm.
+  if (my $fh = $q->upload('text')) {
+    local undef $/;
+    $text = <$fh>;
+  } else {
+    $text = $q->param('text');
+    $text =~ s/\r//g;
+  }
+
+  my $comment = $q->param('comment');
   my $user = $r->connection->user || "anonymous";
 
   chomp ($comment);
@@ -208,20 +234,18 @@ sub save_function {
   $comment =~ s/\s*$//g if $comment;
 
   if (length($text) < 5) {
-	return fatal_error($r, "Not enough content");
+    return fatal_error($r, "Not enough content");
   }
 
   if (length($comment) < 3) {
-  	return fatal_error($r, "No comment");
+    return fatal_error($r, "No comment");
   }
 
   my $file = rcs_open($r, $fileuri);
 
   if (-f "${datadir}/${fileuri},v" && $file->lock) {
     # previous locks exist, removing.  Is this a good idea?
-    eval {
-      $file->ci('-u', '-w'.$user) || die $!;
-    };
+    eval { $file->ci('-u', '-w'.$user) or confess $!; };
     if ($@) {
       my $locker = $file->lock;
       return fatal_error ($r, "($locker) Could not unlock $fileuri: $@");
@@ -229,17 +253,29 @@ sub save_function {
     #return fatal_error($r, "Page $fileuri is already locked");
   }
 
+#  if (-f "${datadir}/${fileuri},v") {
+#    $file->co('-l') || die $!;
+#  }
+
   if (-f "${datadir}/${fileuri},v") {
-    $file->co('-l') || die $!;
+    $file->co('-l') or confess $!;
+  } else {
+    my @opts = ('-i');
+    if (!(-f "${datadir}/${fileuri},v") and is_binary($fileuri)) {
+      push (@opts, '-kb');
+    }
+    $file->rcs(@opts) or confess $!;
   }
 
   open(OUT, '>', "${datadir}/${fileuri}");
   print OUT $text;
   close OUT;
 
-  if (!(-f "${datadir}/${fileuri}i,v") or $file->lock) {
-    $file->ci('-u', '-w'.$user, "-m$comment") || die $!;
-  }
+# if (!(-f "${datadir}/${fileuri},v") or $file->lock) {
+#   $file->ci('-u', '-w'.$user, "-m$comment") || die $!;
+# }
+
+  $file->ci('-u', "-w$user", "-m$comment") or confess $!;
 
   $uri = "index" if ($uri and $uri eq 'template');
 
@@ -251,7 +287,7 @@ sub revert_function {
   my ($r, $uri, $revision) = @_;
 
   my $fileuri = uri_to_filename($uri);
-	
+  
   my $user = $r->connection->user || "anonymous";
 
   my %args = $r->args;
@@ -299,7 +335,7 @@ sub revert_function {
 
   my $mtime = stat("$datadir/$fileuri,v")->mtime;
   my $date = &ParseDateString("epoch $mtime");
-  my $lastmod = &UnixDate($date, "%B %d, %Y<br>%H:%M %p");
+  my $lastmod = &UnixDate($date, "%B %d, %Y<br>%i:%M %p");
 
   $template->param('vroot', $vroot);
   $template->param('title', $uri);
@@ -307,6 +343,8 @@ sub revert_function {
   $template->param('editlink', "$vroot/\(edit\)\/$uri");
   $template->param('loglink', "$vroot/\(log\)\/$uri");
   $template->param("lastmod", "Last changed:<br>" . $lastmod);
+
+  $r->send_http_header('text/html');
   print $template->output;
 
   return OK;
@@ -323,27 +361,34 @@ sub edit_function {
     my $file = rcs_open($r, $fileuri);
     eval { $file->co; };
     if ($@) {
-	  return fatal_error($r, "Error while retrieving $fileuri: $@");
-	}
+      return fatal_error($r, "Error while retrieving $fileuri: $@");
+    }
   }
 
-  my $text = "<form method=\"post\" action=\"${vroot}/(save)${uri}\">\n";
-  $text .= "<textarea name=\"text\" cols=80 rows=25 wrap=virtual>\n";
-  if (-f "${datadir}/${fileuri},v") {
-    open(IN, '<', "${datadir}/${fileuri}");
-	my $cvstext = join("", <IN>);
-	close (IN);
-    $cvstext =~ s/</&lt;/g;
-    $cvstext =~ s/>/&gt;/g;
-    $text .= $cvstext;
+  my $text = "<form method=\"post\" action=\"${vroot}/(save)${uri}\" enctype=\"multipart/form-data\">\n";
+  
+  if (is_binary($fileuri)) {
+    $text .= "<input type=\"file\" name=\"text\">\n";
+  } else {
+    $text .= "<textarea name=\"text\" cols=80 rows=25 wrap=virtual>\n";
+    if (-f "${datadir}/${fileuri},v") {
+      open(IN, '<', "${datadir}/${fileuri}");
+      my $cvstext = join("", <IN>);
+      close (IN);
+      $cvstext =~ s/</&lt;/g;
+      $cvstext =~ s/>/&gt;/g;
+      $text .= $cvstext;
+    }
+    $text .= "</textarea>"
   }
-  $text .= "</textarea><p>Comment: <input type=text size=30 maxlength=80 name=comment>&nbsp;<input type=\"submit\" name=\"Save\" value=\"Save\"></form>";
+  
+  $text .= "<p>Comment: <input type=text size=30 maxlength=80 name=comment>&nbsp;<input type=\"submit\" name=\"Save\" value=\"Save\"></form>";
 
   my $lastmod = "never";
   if (-f "${datadir}/${fileuri},v") {
     my $mtime = stat("$datadir/$fileuri,v")->mtime;
     my $date = &ParseDateString("epoch $mtime");
-    $lastmod = &UnixDate($date, "%B %d, %Y<br>%H:%M %p");
+    $lastmod = &UnixDate($date, "%B %d, %Y<br>%i:%M %p");
   }
 
   $template->param('vroot', $vroot);
@@ -355,7 +400,10 @@ sub edit_function {
 
   my $output = $template->output;
   $output =~ s/\n(\s*)\n(\s*)\n/\n\n/g;
+
+  $r->send_http_header('text/html');
   print $output;
+
   return OK;
 }
 
@@ -382,67 +430,98 @@ sub view_function {
     return fatal_error($r, "Error retriving $fileuri, check revision: $@");
   }
 
-  open(IN, '<', "${datadir}/${fileuri}");
-  my $text = join("", <IN>);
-  close IN;
-
-  # This converts the text into HTML with the help of HTML::FromText.
-  # See the POD information for HTML::FromText for an explanation of
-  # these settings.
-  my $newtext = text2html($text, urls => 1, email => 1, bold => 1,
-			  underline =>1, paras => 1, bullets => 1, numbers=> 1,
-			  headings => 1, blockcode => 1, tables => 1,
-			  title => 1, code => 1);
-
-  # While the text contains Wiki-style links, we go through each one and
-  # change them into proper HTML links.
-  while ($newtext =~ /\[\[([^\]|]*)\|?([^\]]*)\]\]/) {
+  if (is_binary($fileuri)) {
+    # If we're running under mod_perl, we can use its interface
+    # to Apache's I/O routines to send binary files more efficiently.
+    if (exists $ENV{MOD_PERL}) {
+      my $fh = Apache::File->new("${datadir}/${fileuri}");
+      $r->send_http_header();
+      $r->send_fd($fh);
+      $fh->close();
+    } else {
+      my $file;
+      open (FILE, "${datadir}/${fileuri}");
+      { local undef $/; $file = <FILE>; }
+      $r->send_http_header();
+      print $file;
+    }
+  } else {
+    open(IN, '<', "${datadir}/${fileuri}");
+    my $text = join("", <IN>);
+    close IN;
+  
+    # This converts the text into HTML with the help of HTML::FromText.
+    # See the POD information for HTML::FromText for an explanation of
+    # these settings.
+    my $newtext = text2html($text, urls => 1, email => 1, bold => 1,
+      underline =>1, paras => 1, bullets => 1, numbers=> 1,
+      headings => 1, blockcode => 1, tables => 1,
+      title => 1, code => 1);
+  
+    # While the text contains Wiki-style links, we go through each one and
+    # change them into proper HTML links.
+    while ($newtext =~ /\[\[([^\]|]*)\|?([^\]]*)\]\]/) {
     my $rawname = $1;
-	my $revision;
-	if ($rawname =~ /\//) {
-		($rawname, $revision) = split (/\//, $rawname);
-	}
+    my $revision;
+    if ($rawname =~ /\//) {
+      ($rawname, $revision) = split (/\//, $rawname);
+    }
     my $desc = $2 || $rawname;
     my $tmplink;
-
+  
     my $tmppath = uri_to_filename($rawname);
     $tmppath =~ s/^_//;
-
+  
     if (-f "${datadir}/$tmppath,v") {
-      $newtext =~ s/\[\[[^\]]*\]\]/<a href="${vroot}\/${rawname}\/$revision">$desc<\/a>/;
+      my $link;
+      if (is_img($rawname)) {
+        $link = qq{<a href="$vroot/$rawname"><img src="$vroot/(thumb)$rawname" alt="$desc"></a>};
+	  }
+      else {
+        $link = qq{<a href="$vroot/$rawname">$desc</a>};
+      }
+      if (is_binary($rawname) || is_img($rawname)) {
+        $link .= qq { <sup><a href="$vroot/(edit)$rawname">[E]</a></sup>};
+      }
+      
+      $newtext =~ s/\[\[[^\]]*\]\]/$link/;
+      
     } else {
       $tmplink = "$desc <a href=\"${vroot}\/(edit)/${rawname}\"><sup>?<\/sup><\/a>";
       $newtext =~ s/\[\[[^\]]*\]\]/$tmplink/;
     }
-  }
-  $newtext =~ s/\\\[\\\[/\[\[/g;
-
-  $newtext =~ s/-{3,}/<hr>/g;
-
-  my %dispatch = (
-  	list => \&get_list,
-	listchanges => \&get_listchanges
-  );
-
-  if ($dispatch{$uri}) {
+    }
+    $newtext =~ s/\\\[\\\[/\[\[/g;
+  
+    $newtext =~ s/-{3,}/<hr>/g;
+  
+    my %dispatch = (
+    list => \&get_list,
+    listchanges => \&get_listchanges
+    );
+    
+    if ($dispatch{$uri}) {
     $newtext .= $dispatch{$uri}($r);
+    }
+  
+    my $mtime = stat("$datadir/$fileuri,v")->mtime;
+    my $date = &ParseDateString("epoch $mtime");
+    my $lastmod = &UnixDate($date, "%B %d, %Y<br>%i:%M %p");
+  
+    $template->param('vroot', $vroot || "no vroot");
+    $template->param('title', $uri);
+    $template->param('body', $newtext);
+    $template->param('editlink', "$vroot/\(edit\)\/$uri");
+    $template->param('loglink', "$vroot/\(log\)\/$uri");
+    $template->param('pageurl', "http://$ENV{SERVER_NAME}:$ENV{SERVER_PORT}$ENV{REQUEST_URI}");
+    $template->param("lastmod", "Last changed:<br>" . $lastmod);
+  
+    my $output = $template->output;
+    $output =~ s/\n(\s*)\n(\s*)\n/\n\n/g;
+  
+    $r->send_http_header('text/html');
+    print $output;
   }
-
-  my $mtime = stat("$datadir/$fileuri,v")->mtime;
-  my $date = &ParseDateString("epoch $mtime");
-  my $lastmod = &UnixDate($date, "%B %d, %Y<br>%H:%M %p");
-
-  $template->param('vroot', $vroot || "no vroot");
-  $template->param('title', $uri);
-  $template->param('body', $newtext);
-  $template->param('editlink', "$vroot/\(edit\)\/$uri");
-  $template->param('loglink', "$vroot/\(log\)\/$uri");
-  $template->param('pageurl', "http://$ENV{SERVER_NAME}:$ENV{SERVER_PORT}$ENV{REQUEST_URI}");
-  $template->param("lastmod", "Last changed:<br>" . $lastmod);
-
-  my $output = $template->output;
-  $output =~ s/\n(\s*)\n(\s*)\n/\n\n/g;
-  print $output;
 
   return OK;
 }
@@ -472,7 +551,7 @@ sub diff_function {
 
   my $diffbody;
   eval {
-  	$diffbody = join ('', $rcs->rcsdiff("-$diffformat", @rev));
+    $diffbody = join ('', $rcs->rcsdiff("-$diffformat", @rev));
   };
   if ($@) {
     return fatal_error($r, "Diff failed for $uri: $@");
@@ -483,7 +562,7 @@ sub diff_function {
 
   my $mtime = stat("$datadir/$uri,v")->mtime;
   my $date = &ParseDateString("epoch $mtime");
-  my $lastmod = &UnixDate($date, "%B %d, %Y<br>%H:%M %p");
+  my $lastmod = &UnixDate($date, "%B %d, %Y<br>%i:%M %p");
   
   $template->param('vroot', $vroot);
   $template->param('title', $uri);
@@ -492,6 +571,7 @@ sub diff_function {
   $template->param('loglink', "$vroot/\(log\)\/$uri");
   $template->param("lastmod", "Last changed:<br>" . $lastmod);
 
+  $r->send_http_header('text/html');
   print $template->output;
 
   return OK;
@@ -522,48 +602,43 @@ sub log_function {
   # use text2html to format the page title, so that it will
   # match the titles in the rest of the site.
   $logbody = text2html($logbody, urls => 1, email => 1, bold => 1,
-			  underline =>1, paras => 1, bullets => 1, numbers=> 1,
-			  headings => 1, blockcode => 1, tables => 1,
-			  title => 1, code => 1);
+        underline =>1, paras => 1, bullets => 1, numbers=> 1,
+        headings => 1, blockcode => 1, tables => 1,
+        title => 1, code => 1);
  
   $logbody .= qq|<a href="#diff_form">Compare revisions</a><br><br>\n|;
 
   my $server = $r->server->server_hostname;
 
   foreach my $line (@rlog_complete) {
-	if ($line =~ /Initial checkin|empty log message|=============/) {
-		next;
-	}
-	elsif ($line !~ /:/ && $line !~ /----/ && $line !~ /revision|date/i) {
-	   chomp($line);
-	   $line = "&nbsp;" x 5 . "<i>$line</i><br>\n" if $line;
-	}
-	elsif ($line !~ /^(revision |date: )/) {
-		next;
-	}
-	elsif ($line =~ /^revision /) {
-		my ($word, $revision) = split (' ', $line);
-		$line = qq|<a href="${vroot}/$uri/$revision">View</a> or |;
-		$line .= qq|<a href="${vroot}/(diff)/$uri/?rev1=$revision">Diff</a> or |;
-		$line .= qq|<a href="${vroot}/(revert)/$uri/$revision">Revert</a>  |;
-		$line .= qq|revision $revision:<br>\n|;
-		$line .= "&nbsp;" x 5;
-	}
-	elsif ($line =~ /date:/ and $line =~ /state:/) {
-		$line =~ s/\n|\t//g;
-		$line .= "<br>\n";
-	}
-	else {
-		$line .= "<br>";
-	}
-	$logbody .= "$line";
+    if ($line =~ /Initial checkin|empty log message|=============/) {
+      next;
+    } elsif ($line !~ /:/ && $line !~ /----/ && $line !~ /revision|date/i) {
+      chomp($line);
+      $line = "&nbsp;" x 5 . "<i>$line</i><br>\n" if $line;
+    } elsif ($line !~ /^(revision |date: )/) {
+      next;
+    } elsif ($line =~ /^revision /) {
+      my ($word, $revision) = split (' ', $line);
+      $line = qq|<a href="${vroot}/$uri?rev=$revision">View</a> or |;
+      $line .= qq|<a href="${vroot}/(diff)/$uri?rev1=$revision">Diff</a> or |;
+      $line .= qq|<a href="${vroot}/(revert)/$uri?rev=$revision">Revert</a>  |;
+      $line .= qq|revision $revision:<br>\n|;
+      $line .= "&nbsp;" x 5;
+    } elsif ($line =~ /date:/ and $line =~ /state:/) {
+      $line =~ s/\n|\t//g;
+      $line .= "<br>\n";
+    } else {
+      $line .= "<br>";
+    }
+    $logbody .= "$line";
   }
 
   $logbody .= &diff_form($uri);
 
   my $mtime = stat("$datadir/$uri,v")->mtime;
   my $date = &ParseDateString("epoch $mtime");
-  my $lastmod = &UnixDate($date, "%B %d, %Y<br>%H:%M %p");
+  my $lastmod = &UnixDate($date, "%B %d, %Y<br>%i:%M %p");
   
   $template->param('vroot', $vroot);
   $template->param('title', $uri);
@@ -572,9 +647,59 @@ sub log_function {
   $template->param('loglink', "$vroot/\(log\)\/$uri");
   $template->param("lastmod", "Last changed:<br>" . $lastmod);
 
+  $r->send_http_header('text/html');
   print $template->output;
 
   return OK;
+}
+
+
+
+# this function creates a thumbnail on the fly for the given uri.
+# if the image is bigger then the cutoff, it gets resized. If not, it 
+# is left alone.
+sub thumb_function {
+	my ($r, $uri, $revision) = @_;
+
+	my $fileuri = $datadir . "/" . uri_to_filename($uri);
+	my $thumburi = $datadir . "/THUMB_" . uri_to_filename($uri);
+
+	my $image = Image::Magick->new;
+
+	my ($width, $height, $size, $format) = $image->Ping($fileuri);
+	my $file_mtime = stat($fileuri)->mtime;
+
+	if ($width < $max_width && $height < $max_height) {
+		# don't scale it down
+		return send_file($r, $fileuri);
+	}
+	else {
+		if (!-f $thumburi || stat($thumburi)->mtime < $file_mtime) {
+			my $resize_ratio;
+			if ($width > $height) {
+				# eg. .2 = 1200 / 240
+				$resize_ratio = $width / $max_width;
+			} else {
+				$resize_ratio = $height / $max_height;
+			}
+			$width /= $resize_ratio;
+			$height /= $resize_ratio;
+			$image->Read($fileuri);
+			$image->Resize("${width}x${height}");
+			$image->Write($thumburi);
+		}
+		return send_file($r, $thumburi);
+	}
+}
+
+sub send_file {
+	my ($r, $filename) = @_;
+
+	my $fh = Apache::File->new($filename);
+	$r->send_http_header();
+	$r->send_fd($fh);
+	$fh->close();
+	return OK;
 }
 
 # this function returns the HTML for a form that allows the
@@ -604,12 +729,12 @@ END
 # This function loads the template, if one exists. If there is no template,
 # then a default template consisting of just a plain body is used.
 sub get_template {
-	my ($r) = @_;
+  my ($r) = @_;
 
-    if (! -f "${datadir}/template,v") {
-	  $r->log_error("template,v does not exist!");
+  if (! -f "${datadir}/template,v") {
+    $r->log_error("template,v does not exist!");
 
-      my $template_text = <<END_TEMPLATE;
+    my $template_text = <<END_TEMPLATE;
 <html>
 <head><title>Default Wiki: <TMPL_VAR NAME=title></title></head>
 <body>
@@ -626,41 +751,53 @@ See the archive: <a href="<TMPL_VAR NAME=loglink>">Archive</a>.
 <TMPL_VAR NAME="lastmod">
 </body></html>
 END_TEMPLATE
-      return HTML::Template->new(
-        scalarref => \$template_text,
-        die_on_bad_params => 0);
-    } 
-    
-    eval { rcs_open($r, "template")->co(); };
-    return fatal_error($r, "Error retrieving template: $@") if ($@);
+  
     return HTML::Template->new(
-      filename => "$datadir/template",
-      cache => 1,
-      die_on_bad_params => 0
+      scalarref => \$template_text, die_on_bad_params => 0
     );
+  }
+
+  my $template = "template";
+  foreach my $temp (@templates) {
+    if ($temp && $r->uri =~ /$temp/i) {
+	  $temp = "template-$temp";
+	  next if not -f "$datadir/$temp,v";
+      $template = $temp;
+	  last;
+	}
+  }
+    
+  eval { rcs_open($r, $template)->co(); };
+  return fatal_error($r, "Error retrieving template: $@") if ($@);
+  
+  return HTML::Template->new(
+    filename => "$datadir/$template",
+    cache => 1,
+	die_on_bad_params => 0
+  );
 }
 
 # This function lists all files in the data directory
 # and returns an HTML formatted list of links.
 sub get_list {
-	my $linklist = "";
+  my $linklist = "";
 
-	chdir ($datadir);
+  chdir ($datadir);
 
-	# get the list of files...
-	my @files = <*,v>;
+  # get the list of files...
+  my @files = <*,v>;
 
-	# sort them 
-	my @sorted_files = sort {uc($a) cmp uc($b)} @files;
-	
-	foreach my $rawname (@sorted_files) {
-		$rawname =~ s/,v$//;
-		$rawname =~ s/^\///g;
-		next if ($rawname eq "template");
-		$linklist .= qq|<a href="$vroot/$rawname">$rawname</a><br>\n|;
-	}
-	
-	return $linklist;
+  # sort them 
+  my @sorted_files = sort {uc($a) cmp uc($b)} @files;
+  
+  foreach my $rawname (@sorted_files) {
+    $rawname =~ s/,v$//;
+    $rawname =~ s/^\///g;
+    next if ($rawname eq "template");
+    $linklist .= qq|<a href="$vroot/$rawname">$rawname</a><br>\n|;
+  }
+  
+  return $linklist;
 }
 
 # This function does up a pretty list of all the changes in the
@@ -680,7 +817,7 @@ sub get_listchanges {
 	# control when laying it out.
 	my $records = {};
 	
-	open (LS, "cd $datadir; /bin/ls -1at *,v | grep -v template,v |")
+	open (LS, "cd $datadir; /bin/ls -1at *,v | grep -v template |")
 	 || return fatal_error($r, "Could not get a listing: $!");
 	
 	my $day_counter = 0;
@@ -724,15 +861,19 @@ sub get_listchanges {
 			}
 		}
 
-		# obtain the title of the page, which should be the
-		# first line of the page normally.
-		my $working_file = $page;
-		open (FILE, "< $datadir/$working_file") || 
-			next;
-		while ($title = (<FILE>)) {
-			last if ($title);
+		if (-T $page and !is_binary($page)) {
+			# obtain the title of the page, which should be the
+			# first line of the page normally.
+			# Only do this if it is a text file. For binary files,
+			# the filename will be used.
+			my $working_file = $page;
+			open (FILE, "< $datadir/$working_file") || 
+				next;
+			while ($title = (<FILE>)) {
+				last if ($title);
+			}
+			close (FILE);
 		}
-		close (FILE);
 		
 		$title ||= $page;
 
@@ -743,14 +884,22 @@ sub get_listchanges {
 
 		$comment = ucfirst($comment);
 
-		my ($date, $time) = split (/\ /, $datestamp);
+		# convert from RCS's GMT timestamps to PST.
+		my $fixedtime = &ParseDateString($datestamp);
+		my $delta = &ParseDateDelta("$timediff hours");
+		$fixedtime = &DateCalc($fixedtime, $delta);
+		my $nicetime = &UnixDate($fixedtime, "%i:%M %p");
+		$fixedtime = &UnixDate($fixedtime, "%Y/%m/%d %H:%M:%S");
+
+		my ($date, $time) = split (/\ /, $fixedtime);
 		my ($year, $month, $day) = split (/\//, $date);
 
 		$records->{$year}->{$month}->{$day}->{"$time"} = {
 			page => $pagelink,
 			title => $title,
 			comment => $comment,
-			lines => $lines
+			lines => $lines,
+			nicetime => $nicetime
 		};
 		$page_counter++;
 		if ($args{maxpages} && ($page_counter >= $args{maxpages})) {
@@ -773,12 +922,7 @@ sub get_listchanges {
 				$changes .= "&nbsp;&nbsp;<b><i>$date</i></b><br>\n";
 				foreach my $time (reverse sort keys %{$records->{$year}->{$month}->{$day}}) {
 					my $record = $records->{$year}->{$month}->{$day}->{$time};
-					my $nicetime = "$year$month$day$time";
-					$nicetime =~ s/://g;
-					$nicetime = &ParseDateString($nicetime);
-					my $delta = &ParseDateDelta("- 7 hours");
-					$nicetime = &DateCalc($nicetime, $delta);
-					$nicetime = &UnixDate($nicetime, "%H:%M %p");
+					my $nicetime = $record->{nicetime};
 					$changes .= qq|
 &nbsp;&nbsp;&nbsp;
 $nicetime <a href="$vroot/$record->{page}">$record->{title}</a>
@@ -815,18 +959,28 @@ $nicetime <a href="$vroot/$record->{page}">$record->{title}</a>
 # a Wiki, but leaves existing authentication in place for editing
 # content.
 sub access_handler {
-	my $r = shift;
+  my $r = shift;
 
-	return OK unless $r->some_auth_required;
+  return OK unless $r->some_auth_required;
 
-	my $uri = $r->uri;
-	unless ($uri =~ /\((edit|save|revert)\)/) {
-		$r->set_handlers(PerlAuthenHandler => [\&OK]);
-		$r->set_handlers(PerlAuthzHandler => [\&OK])
-			if grep { lc($_->{requirement}) ne 'valid-user' } @{$r->requires};
-	}
+  my $uri = $r->uri;
+  unless ($uri =~ /\((edit|save|revert)\)/) {
+    $r->set_handlers(PerlAuthenHandler => [\&OK]);
+    $r->set_handlers(PerlAuthzHandler => [\&OK])
+      if grep { lc($_->{requirement}) ne 'valid-user' } @{$r->requires};
+  }
 
-	return OK;
+  return OK;
+}
+
+sub is_binary {
+  my $uri = shift;
+  return ($uri =~ /\.(.+)$/ && grep /$1/i, @binfmts);
+}
+
+sub is_img {
+  my $uri = shift;
+  return ($uri =~ /\.(.+)$/ && grep /$1/i, @imgfmts);
 }
 
 1;
@@ -846,11 +1000,15 @@ are needed. What is does support though is:
   - storage of Wiki pages in RCS
   - templates through HTML::Template
   - text to HTML conversion with HTML::FromText
-  - basic authentification password changes
-  - ability to view any revision of a page
-  - ability to revert back to any revision of the page
+  - basic authentication password changes
+  - uploading of binary (pdf, doc, gz, zip, ps)
+  - uploading of images (jpg, jpeg, gif, png)
+  - automatic thumbnailing of large using ImageMagick
+  - sub directories
+  - view any revision of a page
+  - revert back to any revision of the page
   - basic checks to keep search engine spiders from deleting 
-    all the pages in the Wiki!!!
+    all the pages in the Wiki
 
 =head1 DEPENDENCIES
 
@@ -859,6 +1017,8 @@ This module requires these other modules:
   Apache::Htpasswd
   Apache::Constants
   CGI
+  Date::Manip
+  Image::Magick
   HTML::FromText
   HTML::Template
   Rcs
@@ -959,6 +1119,22 @@ The C<vroot> should match the virtual directory that MiniWiki runs under.
 If this variable is set, it should point to a standard htpasswd file
 which MiniWiki has write access to. The function to change a users password
 is then enabled.
+  
+The default timezone is GMT-8 (PST). To change to a different timezone, 
+use the C<timediff> variable. Eg, to change to Amsterdam / Rome:
+
+  PerlAddVar timediff 1
+
+By default, only the template called template is used. This becomes 
+the default template for every page. Use the C<templates> variable to specify
+more then one template:
+  
+  PerlAddVar templates fvlug linux
+
+By doing this, pages that contain those words will use the matching template.
+For example, the /your-wiki-vroot/LinuxDatabases page will then use the template-linux page,
+instead of template. You will need to create the template by going to
+/wiki/your-wiki-vroot/(edit)/template-<the_template> first.
 
 If you create the pages 'list' or 'listchanges', the following will
 automatically get appended to them:
@@ -1021,7 +1197,7 @@ Brian Lauer, E<lt>fozbaca@yahoo.comE<gt>
 
 =head1 SEE ALSO
 
-L<perl>, L<Apache::Registry>, L<HTML::FromText>, L<HTML::Template>, L<Rcs>, L<CGI>.
+L<perl>, L<Apache::Registry>, L<HTML::FromText>, L<HTML::Template>, L<Rcs>, L<CGI>, L<Date::Manip>, L<Image::Magick>.
 
 =cut
 

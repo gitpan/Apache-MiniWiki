@@ -19,7 +19,6 @@ use warnings;
 use lib qw( /etc/httpd/perl/lib );
 
 use Apache::MiniWiki;
-use Apache::MiniWiki::Access;
 
 =head2 $wikidir
 The directory where all your Wikis are located,
@@ -50,7 +49,7 @@ as follows:
   )
 
 All the keys are optional. If _public is 0, the Wiki will be
-password-protected. If 1, it will use Apache::MiniWiki::Access,
+password-protected. If 1, it will use Apache::MiniWiki::access_handler,
 which allows public viewing, and requires a password to edit
 (not entirely Wiki-nature, I know).
 
@@ -83,7 +82,7 @@ while (my ($wiki, $wiki_info) = each %wikis) {
 	# Deal with authentication, depending
 	# on whether the wiki is public or not.
 	my $perlaccesshandler = $wiki_info->{_public} ?
-		"PerlAccessHandler Apache::MiniWiki::Access" : '';
+		"PerlAccessHandler Apache::MiniWiki::access_handler" : '';
 
 	Apache->httpd_conf( <<EOF );
 <Location $uri>

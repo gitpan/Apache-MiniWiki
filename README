@@ -9,11 +9,15 @@ DESCRIPTION
       - storage of Wiki pages in RCS
       - templates through HTML::Template
       - text to HTML conversion with HTML::FromText
-      - basic authentification password changes
-      - ability to view any revision of a page
-      - ability to revert back to any revision of the page
+      - basic authentication password changes
+      - uploading of binary (pdf, doc, gz, zip, ps)
+      - uploading of images (jpg, jpeg, gif, png)
+      - automatic thumbnailing of large using ImageMagick
+      - sub directories
+      - view any revision of a page
+      - revert back to any revision of the page
       - basic checks to keep search engine spiders from deleting 
-        all the pages in the Wiki!!!
+        all the pages in the Wiki
 
 DEPENDENCIES
     This module requires these other modules:
@@ -21,6 +25,8 @@ DEPENDENCIES
       Apache::Htpasswd
       Apache::Constants
       CGI
+      Date::Manip
+      Image::Magick
       HTML::FromText
       HTML::Template
       Rcs
@@ -118,6 +124,23 @@ CONFIGURATION
     which MiniWiki has write access to. The function to change a users
     password is then enabled.
 
+    The default timezone is GMT-8 (PST). To change to a different timezone,
+    use the "timediff" variable. Eg, to change to Amsterdam / Rome:
+
+      PerlAddVar timediff 1
+
+    By default, only the template called template is used. This becomes the
+    default template for every page. Use the "templates" variable to specify
+    more then one template:
+
+      PerlAddVar templates fvlug linux
+
+    By doing this, pages that contain those words will use the matching
+    template. For example, the /your-wiki-vroot/LinuxDatabases page will
+    then use the template-linux page, instead of template. You will need to
+    create the template by going to
+    /wiki/your-wiki-vroot/(edit)/template-<the_template> first.
+
     If you create the pages 'list' or 'listchanges', the following will
     automatically get appended to them:
 
@@ -170,5 +193,6 @@ CONTRIBUTORS
     Brian Lauer, <fozbaca@yahoo.com>
 
 SEE ALSO
-    perl, Apache::Registry, HTML::FromText, HTML::Template, Rcs, CGI.
+    perl, Apache::Registry, HTML::FromText, HTML::Template, Rcs, CGI,
+    Date::Manip, Image::Magick.
 
