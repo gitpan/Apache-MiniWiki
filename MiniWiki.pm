@@ -18,7 +18,7 @@ use Date::Manip;
 use CGI;
 use Rcs 1.04;
 
-our $VERSION = 0.30;
+our $VERSION = 0.41;
 
 our $datadir;       # Directory where we store Wiki pages
 our $vroot;         # The virtual root we're using
@@ -73,7 +73,7 @@ sub handler {
   my ($uri) = ($r->uri =~ m/${vroot}\/?(.*)/i);
 
   # Load the template for this Wiki
-  load_template();
+  load_template($r);
 
   # We currently do not allow the clients browser to cache the document.
   # This means that Opera, for example, has a better chance of actually
@@ -177,11 +177,15 @@ sub save_function {
   $text =~ s///g;
   my $user = $r->connection->user || "anonymous";
 
+  chomp ($comment);
+  $comment =~ s/^\s*//g if $comment;
+  $comment =~ s/\s*$//g if $comment;
+
   if (length($text) < 5) {
 	return fatal_error($r, "Not enough content");
   }
 
-  if (not $comment) {
+  if (length($comment) < 3) {
   	return fatal_error($r, "No comment");
   }
 
@@ -194,11 +198,13 @@ sub save_function {
   if (-f "${datadir}/${fileuri}" && $file->lock) {
   	# previous locks exist, removing.
 	# Is this good?
+	$r->log_error("remove existing lock... " . $file->lock);
     eval {
 			$file->ci('-u', '-w'.$user);
 		};
 		if ($@) {
-			return fatal_error ($r, "Could not unlock $fileuri: $@");
+			my $locker = $file->lock;
+			return fatal_error ($r, "($locker) Could not unlock $fileuri: $@");
 		}
 	#return fatal_error($r, "Page $fileuri is already locked");
   }
@@ -211,7 +217,8 @@ sub save_function {
   print OUT $text;
   close OUT;
 
-  $file->ci('-u', '-w'.$user, "-m$comment");
+  $r->log_error("committing save...");
+  $file->ci('-u', '-w'.$user, "-m$comment") if $file->lock;
 
   return &view_function($r, $uri, undef);
 }
@@ -266,7 +273,7 @@ sub revert_function {
   }
   $file->arcext(',v');
 
-  eval { $file->ci('-u', '-w'.$user); };
+  eval { $file->ci('-u', '-w'.$user); } if $file->lock;
   if ($@) {
     return fatal_error($r, "Error reverting");
   }
@@ -302,7 +309,7 @@ sub edit_function {
   $text .= "<textarea name=\"text\" cols=80 rows=25 wrap=virtual>\n";
   if (-f "${datadir}/${fileuri},v") {
     open(IN, '<', "${datadir}/${fileuri}");
-    my $cvstext .= join(/\n/, <IN>);
+    my $cvstext .= join("\n", <IN>);
     $cvstext =~ s/</&lt;/g;
     $cvstext =~ s/>/&gt;/g;
     $text .= $cvstext;
@@ -348,7 +355,7 @@ sub view_function {
   }
 
   open(IN, '<', "${datadir}/${fileuri}");
-  my $text = join(/\n/, <IN>);
+  my $text = join("\n", <IN>);
   close IN;
 
   # This converts the text into HTML with the help of HTML::FromText.
@@ -488,7 +495,10 @@ END_TEMPLATE
     (undef, undef, undef, undef, undef, undef, undef, undef, undef, $mtime,
      undef, undef, undef) = stat("${datadir}/template,v");
 
-    if ($mtime gt $template_mod) {
+	# or we can't compare them
+	$mtime || $template_mod || return;
+
+    if (not $template_mod or $mtime gt $template_mod) {
       my $file = Rcs->new;
       $file->workdir("${datadir}");
       $file->rcsdir("$datadir");
@@ -499,7 +509,7 @@ END_TEMPLATE
         return fatal_error($r, "Error retriving template");
       }
       open(IN, '<', "${datadir}/template");
-      $template = join(/\n/, <IN>);
+      $template = join("\n", <IN>);
       close IN;
       $template_mod = $mtime;
     }
@@ -683,6 +693,8 @@ Apache::MiniWiki - Miniature Wiki for Apache
 
 =head1 SYNOPSIS
 
+Add this to httpd.conf:
+
   <Location /wiki>
      PerlAddVar datadir "/home/foo/db/wiki/"
      PerlAddVar vroot "/wiki"
@@ -706,6 +718,34 @@ This module requires these other modules:
   HTML::FromText;
   HTML::Template;
   Rcs;
+
+=head1 ALTERNATIVE SYNOPSIS
+
+Apache::MiniWiki can also be called by an Apache::Registry CGI script. By 
+running it in this manner, absolutely no changes need to be made to the
+web server's httpd.conf, as long as Apache has mod_perl built in.
+
+Copy the example wiki.cgi into your CGI directory and assign it the 
+appropriate permissions. Edit wiki.cgi and set the datadir and vroot
+variables:
+
+$r->dir_config->add(datadir => '/home/foo/db/wiki/');
+$r->dir_config->add(vroot => '/perlcgi/wiki.cgi');
+
+Note #1: This may be a great way of integrating Apache::MiniWiki into
+an existing site that already has it's own header/footer template system.
+
+Note #2: This method assumes that the site administrator is already
+using Apache::Registry to speed up CGI's on the site. If they aren't,
+have them set up mod_perl as it was meant to be. See the mod_perl guide,
+or try this:
+
+  ScriptAlias /perlcgi /path/to/your/cgi-bin/
+  <Location /perlcgi>
+    SetHandler perl-script
+    PerlHandler Apache::Registry
+    Options ExecCGI
+  </Location>
 
 =head1 DESCRIPTION
 
@@ -774,14 +814,19 @@ Disallow: /wiki/lastchanges
 See http://www.nyetwork.org/wiki for an example of 
 this module in active use.
 
-=head1 AUTHOR
+=head1 AUTHORS
 
 Jonas Oberg, E<lt>jonas@gnu.orgE<gt>
+
 Wim Kerkhoff, E<lt>kerw@cpan.orgE<gt>
+
+=head1 CONTRIBUTORS
+
+Brian Lauer, E<lt>fozbaca@yahoo.comE<gt>
 
 =head1 SEE ALSO
 
-L<perl>, L<HTML::FromText>, L<HTML::Template>, L<Rcs>, L<CGI>.
+L<perl>, L<Apache::Registry>, L<HTML::FromText>, L<HTML::Template>, L<Rcs>, L<CGI>.
 
 =cut
 

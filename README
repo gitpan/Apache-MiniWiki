@@ -2,6 +2,8 @@ NAME
     Apache::MiniWiki - Miniature Wiki for Apache
 
 SYNOPSIS
+    Add this to httpd.conf:
+
       <Location /wiki>
          PerlAddVar datadir "/home/foo/db/wiki/"
          PerlAddVar vroot "/wiki"
@@ -24,6 +26,33 @@ DEPENDENCIES
       HTML::FromText;
       HTML::Template;
       Rcs;
+
+ALTERNATIVE SYNOPSIS
+    Apache::MiniWiki can also be called by an Apache::Registry CGI script.
+    By running it in this manner, absolutely no changes need to be made to
+    the web server's httpd.conf, as long as Apache has mod_perl built in.
+
+    Copy the example wiki.cgi into your CGI directory and assign it the
+    appropriate permissions. Edit wiki.cgi and set the datadir and vroot
+    variables:
+
+    $r->dir_config->add(datadir => '/home/foo/db/wiki/');
+    $r->dir_config->add(vroot => '/perlcgi/wiki.cgi');
+
+    Note #1: This may be a great way of integrating Apache::MiniWiki into an
+    existing site that already has it's own header/footer template system.
+
+    Note #2: This method assumes that the site administrator is already
+    using Apache::Registry to speed up CGI's on the site. If they aren't,
+    have them set up mod_perl as it was meant to be. See the mod_perl guide,
+    or try this:
+
+      ScriptAlias /perlcgi /path/to/your/cgi-bin/
+      <Location /perlcgi>
+        SetHandler perl-script
+        PerlHandler Apache::Registry
+        Options ExecCGI
+      </Location>
 
 DESCRIPTION
     Apache::MiniWiki is an simplistic Wiki for Apache. It doesn't have much
@@ -87,9 +116,14 @@ DESCRIPTION
     See http://www.nyetwork.org/wiki for an example of this module in active
     use.
 
-AUTHOR
-    Jonas Oberg, <jonas@gnu.org> Wim Kerkhoff, <kerw@cpan.org>
+AUTHORS
+    Jonas Oberg, <jonas@gnu.org>
+
+    Wim Kerkhoff, <kerw@cpan.org>
+
+CONTRIBUTORS
+    Brian Lauer, <fozbaca@yahoo.com>
 
 SEE ALSO
-    perl, HTML::FromText, HTML::Template, Rcs, CGI.
+    perl, Apache::Registry, HTML::FromText, HTML::Template, Rcs, CGI.
 
